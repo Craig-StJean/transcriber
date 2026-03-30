@@ -253,10 +253,17 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
         });
     }
 
+    let audio_cues_row = adw::SwitchRow::builder()
+        .title("Audio feedback cues")
+        .subtitle("Play a soft sound when recording starts and transcription finishes")
+        .active(cfg.audio_cues_enabled)
+        .build();
+
     behaviour_group.add(&paste_row);
     behaviour_group.add(&history_row);
     behaviour_group.add(&vad_row);
     behaviour_group.add(&direct_inject_row);
+    behaviour_group.add(&audio_cues_row);
 
     // ── Save button ───────────────────────────────────────────────────────────
     let actions_group = adw::PreferencesGroup::new();
@@ -295,6 +302,7 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
         let history_row         = history_row.clone();
         let vad_row             = vad_row.clone();
         let direct_inject_row   = direct_inject_row.clone();
+        let audio_cues_row      = audio_cues_row.clone();
         let save_row            = save_row.clone();
         Rc::new(move || {
             let s = last_saved.borrow();
@@ -311,7 +319,8 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
                 || rate_row.value() as u32         != s.sample_rate
                 || history_row.is_active()         != s.save_history
                 || vad_row.is_active()             != s.vad_enabled
-                || direct_inject_row.is_active()   != s.direct_injection;
+                || direct_inject_row.is_active()   != s.direct_injection
+                || audio_cues_row.is_active()      != s.audio_cues_enabled;
             save_row.set_sensitive(dirty);
         })
     };
@@ -329,6 +338,7 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
     history_row.connect_active_notify({          let c = Rc::clone(&check_dirty); move |_| c() });
     vad_row.connect_active_notify({              let c = Rc::clone(&check_dirty); move |_| c() });
     direct_inject_row.connect_active_notify({    let c = Rc::clone(&check_dirty); move |_| c() });
+    audio_cues_row.connect_active_notify({       let c = Rc::clone(&check_dirty); move |_| c() });
 
     // ── Save handler ──────────────────────────────────────────────────────────
     save_row.connect_activated({
@@ -345,6 +355,7 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
         let history_row         = history_row.clone();
         let vad_row             = vad_row.clone();
         let direct_inject_row   = direct_inject_row.clone();
+        let audio_cues_row      = audio_cues_row.clone();
         let toast_overlay       = toast_overlay.clone();
         let last_saved       = Rc::clone(&last_saved);
         let check_dirty      = Rc::clone(&check_dirty);
@@ -361,9 +372,10 @@ fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> ad
                 custom_model:   custom_model_row.text().to_string(),
                 language:       if lang.is_empty() { None } else { Some(lang) },
                 sample_rate:    rate_row.value() as u32,
-                save_history:     history_row.is_active(),
-                vad_enabled:      vad_row.is_active(),
-                direct_injection: direct_inject_row.is_active(),
+                save_history:       history_row.is_active(),
+                vad_enabled:        vad_row.is_active(),
+                direct_injection:   direct_inject_row.is_active(),
+                audio_cues_enabled: audio_cues_row.is_active(),
             };
             let (title, timeout) = match config::save(&new_cfg) {
                 Ok(()) => {

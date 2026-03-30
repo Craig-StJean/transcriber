@@ -1,5 +1,6 @@
 mod api;
 mod audio;
+mod audio_cues;
 mod db;
 mod dbus;
 
