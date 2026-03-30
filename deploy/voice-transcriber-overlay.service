@@ -1,0 +1,23 @@
+[Unit]
+Description=Voice Transcriber Overlay (wlroots/KDE)
+Documentation=https://github.com/local/voice-transcriber
+After=graphical-session.target
+# Start together with the daemon; both can run independently but this is the
+# typical pairing on non-GNOME Wayland sessions.
+After=voice-transcriber-daemon.service
+PartOf=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/voice-transcriber-overlay
+Restart=on-failure
+RestartSec=3s
+
+# GTK4 + gtk4-layer-shell need a live Wayland display.
+# WAYLAND_DISPLAY is hardcoded here as a safe default; adjust if your
+# compositor uses a different socket (e.g. wayland-1).
+Environment=RUST_LOG=info
+Environment=WAYLAND_DISPLAY=wayland-0
+
+[Install]
+WantedBy=graphical-session.target

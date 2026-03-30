@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.voice-transcriber"
+          path="/org/gnome/shell/extensions/voice-transcriber/">
+
+    <!--
+      Type 'as' (array of strings) is required by Main.wm.addKeybinding().
+      The key is stored in dconf and editable via GNOME Settings > Keyboard
+      or the extension preferences panel.
+    -->
+    <key name="toggle-recording" type="as">
+      <default><![CDATA[['<Super>apostrophe']]]></default>
+      <summary>Toggle recording</summary>
+      <description>Accelerator to start or stop a recording session</description>
+    </key>
+
+    <key name="cancel-recording" type="as">
+      <default><![CDATA[['Escape']]]></default>
+      <summary>Cancel recording</summary>
+      <description>Accelerator to cancel an in-progress recording without transcribing</description>
+    </key>
+
+    <key name="auto-paste" type="b">
+      <default>false</default>
+      <summary>Auto-paste after transcription</summary>
+      <description>Automatically paste the transcription result into the focused window. Terminals receive Ctrl+Shift+V; all other windows receive Ctrl+V.</description>
+    </key>
+
+    <key name="direct-injection" type="b">
+      <default>false</default>
+      <summary>Direct text injection</summary>
+      <description>Type text directly into the focused window instead of pasting from clipboard.</description>
+    </key>
+
+  </schema>
+</schemalist>

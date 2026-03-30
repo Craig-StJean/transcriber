@@ -1,0 +1,46 @@
+[package]
+name    = "voice-transcriber-overlay"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "voice-transcriber-overlay"
+path = "src/main.rs"
+
+[dependencies]
+# Shared config + DBus constants
+common = { path = "../common", package = "voice-transcriber-common" }
+
+# Async runtime
+tokio = { workspace = true }
+
+# DBus IPC — same zbus version as the rest of the workspace
+zbus = { workspace = true }
+
+# Error handling + logging
+anyhow             = { workspace = true }
+tracing            = { workspace = true }
+tracing-subscriber = { workspace = true }
+
+# GTK4 UI toolkit — same major version as the rest of the workspace (links gtk-4)
+gtk4 = "0.11"
+
+# wlr-layer-shell Wayland protocol binding — lets a GTK4 window act as an
+# always-on-top overlay on any compositor that supports wlr-layer-shell
+# (Sway, Hyprland, KDE Plasma 6, River, …).
+# NOT supported on GNOME/Mutter — use the GNOME Shell extension there.
+gtk4-layer-shell = "0.8"
+
+# XDG Desktop Portal — GlobalShortcuts interface for registering system-wide
+# hotkeys on Wayland without root/udev. Requires one-time user approval dialog.
+ashpd = { version = "0.11", features = ["tokio"] }
+
+# Stream combinators for consuming zbus signal streams
+futures-util = "0.3"
+
+# Cross-thread/executor channel compatible with both tokio and glib's executor.
+# Used to bridge daemon events from the Tokio thread to the GTK main thread.
+async-channel = "2"
+
+# Wayland text injection for direct text injection mode (PLAN.md #4).
+enigo = { version = "0.3", default-features = false, features = ["wayland"] }

@@ -1,0 +1,30 @@
+[package]
+name    = "voice-transcriber-settings"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "voice-transcriber-settings"
+path = "src/main.rs"
+
+[dependencies]
+common = { path = "../common", package = "voice-transcriber-common" }
+
+gtk4       = { version = "0.11", features = ["blueprint"] }
+libadwaita = { version = "0.9", features = ["v1_8"] }
+# v1_8 enables: SpinRow/ButtonRow (1.6), InlineViewSwitcher/WrapBox (1.7),
+#               ShortcutsDialog/ShortcutLabel/PreferencesGroup.bind_model (1.8)
+# Bump to v1_9 once libadwaita 1.9 ships in Fedora (GNOME 50+)
+
+zbus       = { workspace = true }
+serde      = { workspace = true }
+serde_json = { workspace = true }
+anyhow     = { workspace = true }
+tokio      = { workspace = true }
+dirs       = { workspace = true }
+rusqlite   = { version = "0.39", features = ["bundled"] }
+
+[build-dependencies]
+# blueprint-compiler is a system binary; gtk4's build script invokes it when
+# the "blueprint" feature is enabled.
+# Install it with: sudo dnf install blueprint-compiler

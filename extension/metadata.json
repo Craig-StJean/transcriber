@@ -1,0 +1,9 @@
+{
+  "name": "Voice Transcriber",
+  "description": "Global-hotkey voice transcription overlay powered by voice-transcriber-daemon",
+  "uuid": "voice-transcriber@local",
+  "version": 1,
+  "shell-version": ["47", "48", "49"],
+  "settings-schema": "org.gnome.shell.extensions.voice-transcriber",
+  "gettext-domain": "voice-transcriber"
+}

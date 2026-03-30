@@ -1,0 +1,13 @@
+[workspace]
+members = ["common", "daemon", "app", "overlay"]
+resolver = "2"
+
+[workspace.dependencies]
+tokio              = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+serde              = { version = "1", features = ["derive"] }
+serde_json         = { version = "1" }
+zbus               = { version = "5", default-features = false, features = ["tokio"] }
+anyhow             = { version = "1" }
+tracing            = { version = "0.1" }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dirs               = { version = "6" }
