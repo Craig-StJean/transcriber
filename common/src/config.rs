@@ -43,6 +43,9 @@ pub struct AppConfig {
     /// Type text directly into the focused window instead of copying to clipboard.
     #[serde(default)]
     pub direct_injection: bool,
+    /// Play brief audio cues when recording starts and transcription succeeds.
+    #[serde(default)]
+    pub audio_cues_enabled: bool,
 }
 
 fn default_provider()      -> String { "groq".into() }
@@ -66,6 +69,7 @@ impl Default for AppConfig {
             save_history:      true,
             vad_enabled:       false,
             direct_injection:  false,
+            audio_cues_enabled: false,
         }
     }
 }

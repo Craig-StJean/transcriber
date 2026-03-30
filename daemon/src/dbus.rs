@@ -99,6 +99,10 @@ impl TranscriberInterface {
 
         Self::state_changed(&emitter, "Recording").await?;
 
+        if self.config.lock().unwrap().audio_cues_enabled {
+            crate::audio_cues::play_start();
+        }
+
         // Clone Arcs needed by the VAD auto-stop path.
         let stop_tx_vad   = self.stop_tx.clone();
         let audio_buf_vad = self.audio_buf.clone();
@@ -181,13 +185,16 @@ impl TranscriberInterface {
                             let state   = state_watch.clone();
                             let emitter = emitter_owned.clone();
                             tokio::spawn(async move {
-                                match do_transcription(client, cfg, samples, db).await {
+                                match do_transcription(client, cfg.clone(), samples, db).await {
                                     Ok(text) => {
                                         tracing::info!(
                                             "VAD transcription done: {} chars",
                                             text.len()
                                         );
                                         let _ = Self::transcription_ready(&emitter, &text).await;
+                                        if cfg.audio_cues_enabled {
+                                            crate::audio_cues::play_done();
+                                        }
                                         *state.lock().unwrap() = DaemonState::Done;
                                         let _ = Self::state_changed(&emitter, "Done").await;
                                     }
@@ -237,10 +244,13 @@ impl TranscriberInterface {
         let emitter    = emitter.to_owned();
 
         tokio::spawn(async move {
-            match do_transcription(client, cfg, samples, db).await {
+            match do_transcription(client, cfg.clone(), samples, db).await {
                 Ok(text) => {
                     tracing::info!("transcription done: {} chars", text.len());
                     let _ = Self::transcription_ready(&emitter, &text).await;
+                    if cfg.audio_cues_enabled {
+                        crate::audio_cues::play_done();
+                    }
                     *state.lock().unwrap() = DaemonState::Done;
                     let _ = Self::state_changed(&emitter, "Done").await;
                 }
