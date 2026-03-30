@@ -1,0 +1,22 @@
+[Unit]
+Description=Voice Transcriber Daemon
+Documentation=https://github.com/local/voice-transcriber
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+Type=dbus
+BusName=org.transcriber.Daemon
+
+ExecStart=%h/.local/bin/voice-transcriber-daemon
+Restart=on-failure
+RestartSec=3s
+
+# wl-clipboard-rs needs these to reach the Wayland compositor.
+# WAYLAND_DISPLAY is hardcoded because systemd user services don't
+# automatically inherit it even when the manager's environment has it.
+Environment=RUST_LOG=info
+Environment=WAYLAND_DISPLAY=wayland-0
+
+[Install]
+WantedBy=graphical-session.target

@@ -1,0 +1,25 @@
+# Rust
+/target/
+
+# Node / npm (if any tooling)
+node_modules/
+npm-debug.log*
+
+# Environment / secrets
+.env
+.env.*
+*.env
+
+# Editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Misc
+*.log
