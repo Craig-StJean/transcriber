@@ -46,12 +46,32 @@ pub struct AppConfig {
     /// Play brief audio cues when recording starts and transcription succeeds.
     #[serde(default)]
     pub audio_cues_enabled: bool,
+
+    // ── Real-time streaming ───────────────────────────────────────────────────
+    /// Stream audio over WebSocket for real-time transcription (~300 ms latency).
+    /// Requires direct_injection to be enabled. Groq/Cohere do not support streaming.
+    #[serde(default)]
+    pub streaming_enabled: bool,
+    /// Streaming provider: "deepgram" | "assemblyai"
+    #[serde(default = "default_streaming_provider")]
+    pub streaming_provider: String,
+    /// Deepgram API key (from console.deepgram.com).
+    #[serde(default)]
+    pub deepgram_api_key: String,
+    /// Deepgram model name (e.g. "nova-3").
+    #[serde(default = "default_deepgram_model")]
+    pub deepgram_model: String,
+    /// AssemblyAI API key (from assemblyai.com).
+    #[serde(default)]
+    pub assemblyai_api_key: String,
 }
 
-fn default_provider()      -> String { "groq".into() }
-fn default_groq_model()    -> String { "whisper-large-v3-turbo".into() }
-fn default_cohere_model()  -> String { "cohere-transcribe-03-2026".into() }
-fn default_true()          -> bool   { true }
+fn default_provider()           -> String { "groq".into() }
+fn default_groq_model()         -> String { "whisper-large-v3-turbo".into() }
+fn default_cohere_model()       -> String { "cohere-transcribe-03-2026".into() }
+fn default_streaming_provider() -> String { "deepgram".into() }
+fn default_deepgram_model()     -> String { "nova-3".into() }
+fn default_true()               -> bool   { true }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -66,10 +86,15 @@ impl Default for AppConfig {
             custom_model:   String::new(),
             language:       Some("en".into()),
             sample_rate:    16000,
-            save_history:      true,
-            vad_enabled:       false,
-            direct_injection:  false,
+            save_history:       true,
+            vad_enabled:        false,
+            direct_injection:   false,
             audio_cues_enabled: false,
+            streaming_enabled:    false,
+            streaming_provider:   default_streaming_provider(),
+            deepgram_api_key:     String::new(),
+            deepgram_model:       default_deepgram_model(),
+            assemblyai_api_key:   String::new(),
         }
     }
 }
@@ -99,6 +124,14 @@ impl AppConfig {
             "groq"   => &self.groq_model,
             "cohere" => &self.cohere_model,
             _        => &self.custom_model,
+        }
+    }
+
+    /// API key for the active streaming provider.
+    pub fn active_streaming_key(&self) -> &str {
+        match self.streaming_provider.as_str() {
+            "assemblyai" => &self.assemblyai_api_key,
+            _            => &self.deepgram_api_key,
         }
     }
 

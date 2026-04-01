@@ -19,6 +19,7 @@ export default class VoiceTranscriberExtension extends Extension {
         this._signalIds     = [];
         this._watchId       = 0;
         this._daemonState   = 'Idle';
+        this._lastChunkText = '';
 
         this._bindShortcuts();
         this._watchDaemon();
@@ -33,6 +34,7 @@ export default class VoiceTranscriberExtension extends Extension {
         this._proxy         = null;
         this._settings      = null;
         this._daemonState   = 'Idle';
+        this._lastChunkText = '';
     }
 
     // ── Daemon connection management ─────────────────────────────────────────
@@ -101,7 +103,12 @@ export default class VoiceTranscriberExtension extends Extension {
                     const text = params.get_child_value(0).get_string()[0];
                     console.log(`VoiceTranscriber: TranscriptionReady (${text.length} chars)`);
                     try {
-                        if (this._settings.get_boolean('direct-injection')) {
+                        if (this._lastChunkText) {
+                            // Streaming mode: type any remaining delta vs what was already typed
+                            const delta = text.slice(this._lastChunkText.length);
+                            if (delta) this._directInject(delta);
+                            this._lastChunkText = '';
+                        } else if (this._settings.get_boolean('direct-injection')) {
                             this._directInject(text);
                         } else {
                             St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
@@ -110,6 +117,15 @@ export default class VoiceTranscriberExtension extends Extension {
                         }
                     } catch (e) {
                         console.error('VoiceTranscriber: TranscriptionReady handler failed:', e.message);
+                    }
+                }),
+            bus.signal_subscribe(null, iface, 'TranscriptionChunk', path, null, flags,
+                (_c, _s, _p, _i, _n, params) => {
+                    const text = params.get_child_value(0).get_string()[0];
+                    try {
+                        this._onTranscriptionChunk(text);
+                    } catch (e) {
+                        console.error('VoiceTranscriber: TranscriptionChunk handler failed:', e.message);
                     }
                 }),
         );
@@ -131,10 +147,16 @@ export default class VoiceTranscriberExtension extends Extension {
             this._overlay.setLevel(0);
             this._overlay.update('Transcribing...');
             break;
+        case 'Streaming':
+            this._overlay.setLevel(0);
+            this._overlay.update('Finalizing...');
+            break;
         case 'Done': {
-            const label = this._settings.get_boolean('direct-injection') ? '✓ Typed!'
-                    : this._settings.get_boolean('auto-paste')        ? '✓ Pasted!'
+            const label = (this._settings.get_boolean('direct-injection') || this._lastChunkText !== '')
+                    ? '✓ Typed!'
+                    : this._settings.get_boolean('auto-paste') ? '✓ Pasted!'
                     : '✓ Copied!';
+            this._lastChunkText = '';
             this._overlay.update(label);
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 800, () => {
                 this._overlay.fadeOut();
@@ -143,6 +165,7 @@ export default class VoiceTranscriberExtension extends Extension {
             break;
         }
         case 'Error':
+            this._lastChunkText = '';
             this._overlay.update('✗ Error — check logs');
             GLib.timeout_add(GLib.PRIORITY_DEFAULT, 2500, () => {
                 this._overlay.fadeOut();
@@ -150,8 +173,18 @@ export default class VoiceTranscriberExtension extends Extension {
             });
             break;
         case 'Idle':
+            this._lastChunkText = '';
             this._overlay.fadeOut();
             break;
+        }
+    }
+
+    _onTranscriptionChunk(text) {
+        // Each chunk is a new finalized phrase; inject the delta since the last chunk.
+        const delta = text.slice(this._lastChunkText.length);
+        if (delta) {
+            this._directInject(delta);
+            this._lastChunkText = text;
         }
     }
 
