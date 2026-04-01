@@ -246,26 +246,19 @@ fn build_ui(app: &adw::Application) {
         }
     });
 
-    // Auto-refresh history when daemon completes a transcription
-    if let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+    // Auto-refresh history by polling the database for new entries
+    {
         let refresh = Rc::clone(&history_refresh);
-        #[allow(deprecated)]
-        conn.signal_subscribe(
-            None,
-            Some(common::dbus::INTERFACE_NAME),
-            Some("StateChanged"),
-            Some(common::dbus::OBJECT_PATH),
-            None,
-            gio::DBusSignalFlags::NONE,
-            move |_conn, _sender, _path, _iface, _signal, params| {
-                let state = params.child_value(0);
-                if let Some(s) = state.get::<String>() {
-                    if s == "Idle" {
-                        refresh();
-                    }
-                }
-            },
-        );
+        let last_max_id: Rc<RefCell<i64>> = Rc::new(RefCell::new(latest_history_id()));
+        glib::timeout_add_seconds_local(2, move || {
+            let current = latest_history_id();
+            let prev = *last_max_id.borrow();
+            if current != prev {
+                *last_max_id.borrow_mut() = current;
+                refresh();
+            }
+            glib::ControlFlow::Continue
+        });
     }
 
     window.present();
@@ -623,6 +616,14 @@ struct HistoryEntry {
 
 fn db_path() -> Option<std::path::PathBuf> {
     Some(dirs::data_local_dir()?.join("voice-transcriber").join("history.db"))
+}
+
+fn latest_history_id() -> i64 {
+    let Some(path) = db_path() else { return 0 };
+    if !path.exists() { return 0; }
+    let Ok(conn) = Connection::open(&path) else { return 0 };
+    conn.query_row("SELECT COALESCE(MAX(id), 0) FROM history", [], |row| row.get(0))
+        .unwrap_or(0)
 }
 
 fn load_history() -> Vec<HistoryEntry> {
