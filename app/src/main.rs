@@ -1,13 +1,88 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::time::Duration;
+
+use common::config::{self, AppConfig};
+use gtk4::{gio, glib};
 use libadwaita as adw;
 use adw::prelude::*;
-use gtk4::{gio, glib};
 use rusqlite::{params, Connection};
-use common::config::{self, AppConfig};
 
-// ── Entry point ───────────────────────────────────────────────────────────────
+// ── Auto-save ────────────────────────────────────────────────────────────────
+
+#[derive(Clone)]
+struct AutoSaver {
+    config: Rc<RefCell<AppConfig>>,
+    toast:  adw::ToastOverlay,
+    timer:  Rc<RefCell<Option<glib::SourceId>>>,
+}
+
+impl AutoSaver {
+    fn new(cfg: AppConfig, toast: &adw::ToastOverlay) -> Self {
+        Self {
+            config: Rc::new(RefCell::new(cfg)),
+            toast:  toast.clone(),
+            timer:  Rc::new(RefCell::new(None)),
+        }
+    }
+
+    fn save(&self) {
+        if let Some(id) = self.timer.borrow_mut().take() {
+            id.remove();
+        }
+        let cfg   = Rc::clone(&self.config);
+        let toast = self.toast.clone();
+        let timer = Rc::clone(&self.timer);
+        *self.timer.borrow_mut() = Some(glib::timeout_add_local_once(
+            Duration::from_millis(300),
+            move || {
+                *timer.borrow_mut() = None;
+                if let Err(e) = config::save(&cfg.borrow()) {
+                    eprintln!("save error: {e}");
+                    toast.add_toast(
+                        adw::Toast::builder()
+                            .title("Failed to save settings")
+                            .timeout(4)
+                            .build(),
+                    );
+                }
+            },
+        ));
+    }
+
+    fn update(&self, f: impl FnOnce(&mut AppConfig)) {
+        f(&mut self.config.borrow_mut());
+        self.save();
+    }
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+fn provider_idx(p: &str) -> u32 {
+    match p { "cohere" => 1, "custom" => 2, _ => 0 }
+}
+
+fn provider_str(idx: u32) -> &'static str {
+    match idx { 1 => "cohere", 2 => "custom", _ => "groq" }
+}
+
+fn load_ext_settings() -> Option<gio::Settings> {
+    let schema_dir = dirs::home_dir()?
+        .join(".local/share/gnome-shell/extensions/voice-transcriber@local/schemas");
+    let source = gio::SettingsSchemaSource::from_directory(
+        schema_dir,
+        gio::SettingsSchemaSource::default().as_ref(),
+        false,
+    )
+    .ok()?;
+    let schema = source.lookup(
+        "org.gnome.shell.extensions.voice-transcriber",
+        false,
+    )?;
+    Some(gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
     adw::init().expect("failed to initialise libadwaita");
@@ -19,385 +94,496 @@ fn main() {
 }
 
 fn build_ui(app: &adw::Application) {
-    let cfg = config::load().unwrap_or_default();
-
     let toast_overlay = adw::ToastOverlay::new();
-    let view_stack    = adw::ViewStack::new();
+    let cfg = config::load().unwrap_or_default();
+    let saver = AutoSaver::new(cfg, &toast_overlay);
+    let ext_settings = load_ext_settings();
+
+    // ── Pages ───────────────────────────────────────────────────────────────
+    let view_stack = adw::ViewStack::new();
 
     view_stack.add_titled_with_icon(
-        &build_settings_page(&cfg, &toast_overlay),
-        Some("settings"), "Settings", "preferences-system-symbolic",
+        &build_settings_page(&saver, &ext_settings),
+        Some("settings"),
+        "Settings",
+        "preferences-system-symbolic",
     );
+
+    let (history_widget, history_refresh) = build_history_page(&toast_overlay);
     view_stack.add_titled_with_icon(
-        &build_history_page(),
-        Some("history"), "History", "document-open-recent-symbolic",
+        &history_widget,
+        Some("history"),
+        "History",
+        "document-open-recent-symbolic",
     );
-    let status_page = build_status_page(&view_stack);
+
+    let (status_page, status_refresh) = build_status_page(&toast_overlay, &view_stack);
     view_stack.add_titled_with_icon(
         &status_page,
-        Some("status"), "Status", "emblem-system-symbolic",
+        Some("status"),
+        "Status",
+        "emblem-system-symbolic",
     );
 
+    // ── Header bar ──────────────────────────────────────────────────────────
     let switcher = adw::InlineViewSwitcher::new();
     switcher.set_stack(Some(&view_stack));
 
+    let menu = gio::Menu::new();
+    menu.append(Some("About Voice Transcriber"), Some("app.about"));
+    let menu_btn = gtk4::MenuButton::builder()
+        .icon_name("open-menu-symbolic")
+        .menu_model(&menu)
+        .tooltip_text("Main Menu")
+        .build();
+    menu_btn.add_css_class("flat");
+
+    let clear_btn = gtk4::Button::builder()
+        .icon_name("user-trash-symbolic")
+        .tooltip_text("Clear All History")
+        .visible(false)
+        .build();
+
     let header = adw::HeaderBar::new();
     header.set_title_widget(Some(&switcher));
+    header.pack_end(&menu_btn);
+    header.pack_end(&clear_btn);
 
+    // ── Window ──────────────────────────────────────────────────────────────
     let toolbar_view = adw::ToolbarView::new();
     toolbar_view.add_top_bar(&header);
     toolbar_view.set_content(Some(&view_stack));
-
     toast_overlay.set_child(Some(&toolbar_view));
 
-    adw::ApplicationWindow::builder()
+    let window = adw::ApplicationWindow::builder()
         .application(app)
         .title("Voice Transcriber")
         .default_width(640)
         .default_height(580)
+        .width_request(360)
         .content(&toast_overlay)
-        .build()
-        .present();
-}
+        .build();
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
+    // ── Actions ─────────────────────────────────────────────────────────────
+    let about_action = gio::SimpleAction::new("about", None);
+    about_action.connect_activate({
+        let w = window.clone();
+        move |_, _| {
+            adw::AboutDialog::builder()
+                .application_name("Voice Transcriber")
+                .application_icon("audio-input-microphone-symbolic")
+                .developer_name("Craig")
+                .version("0.1.0")
+                .build()
+                .present(Some(&w));
+        }
+    });
+    app.add_action(&about_action);
 
-fn provider_idx(provider: &str) -> u32 {
-    match provider {
-        "cohere" => 1,
-        "custom" => 2,
-        _        => 0,
+    let quit_action = gio::SimpleAction::new("quit", None);
+    quit_action.connect_activate({
+        let a = app.clone();
+        move |_, _| a.quit()
+    });
+    app.add_action(&quit_action);
+    app.set_accels_for_action("app.quit", &["<Control>q"]);
+
+    for (i, name) in ["settings", "history", "status"].iter().enumerate() {
+        let action = gio::SimpleAction::new(&format!("go-{name}"), None);
+        action.connect_activate({
+            let s = view_stack.clone();
+            let n = name.to_string();
+            move |_, _| s.set_visible_child_name(&n)
+        });
+        window.add_action(&action);
+        app.set_accels_for_action(
+            &format!("win.go-{name}"),
+            &[&format!("<Control>{}", i + 1)],
+        );
     }
+
+    // ── Page visibility logic ───────────────────────────────────────────────
+    view_stack.connect_visible_child_name_notify({
+        let clear_btn = clear_btn.clone();
+        let status_refresh = Rc::clone(&status_refresh);
+        move |stack| {
+            let name = stack.visible_child_name();
+            let name = name.as_deref();
+            clear_btn.set_visible(name == Some("history"));
+            if name == Some("status") {
+                status_refresh();
+            }
+        }
+    });
+
+    clear_btn.connect_clicked({
+        let w = window.clone();
+        let refresh = Rc::clone(&history_refresh);
+        move |_| {
+            let dialog = adw::AlertDialog::builder()
+                .heading("Clear All History?")
+                .body("This will permanently delete all transcriptions and saved recordings.")
+                .build();
+            dialog.add_response("cancel", "Cancel");
+            dialog.add_response("clear", "Clear All");
+            dialog.set_response_appearance("clear", adw::ResponseAppearance::Destructive);
+            dialog.set_default_response(Some("cancel"));
+            dialog.set_close_response("cancel");
+            dialog.connect_response(None, {
+                let refresh = Rc::clone(&refresh);
+                move |_, resp| {
+                    if resp == "clear" {
+                        clear_history_db();
+                        refresh();
+                    }
+                }
+            });
+            dialog.present(Some(&w));
+        }
+    });
+
+    window.present();
 }
 
-fn provider_str(idx: u32) -> &'static str {
-    match idx {
-        1 => "cohere",
-        2 => "custom",
-        _ => "groq",
-    }
-}
+// ── Settings page ────────────────────────────────────────────────────────────
 
-// ── Settings page ─────────────────────────────────────────────────────────────
-
-fn build_settings_page(cfg: &AppConfig, toast_overlay: &adw::ToastOverlay) -> adw::PreferencesPage {
+fn build_settings_page(
+    saver: &AutoSaver,
+    ext_settings: &Option<gio::Settings>,
+) -> adw::PreferencesPage {
     let page = adw::PreferencesPage::new();
 
-    // ── Provider selector ────────────────────────────────────────────────────
+    // ── Provider group ──────────────────────────────────────────────────────
     let provider_group = adw::PreferencesGroup::builder()
-        .title("API Provider")
+        .title("Transcription Provider")
         .build();
 
     let provider_row = adw::ComboRow::builder()
         .title("Provider")
         .model(&gtk4::StringList::new(&["Groq", "Cohere", "Custom"]))
         .build();
+
+    let cfg = saver.config.borrow();
     provider_row.set_selected(provider_idx(&cfg.provider));
-    provider_group.add(&provider_row);
 
-    // ── Groq settings ────────────────────────────────────────────────────────
-    let groq_group = adw::PreferencesGroup::builder()
-        .title("Groq")
-        .description("api.groq.com — OpenAI-compatible Whisper endpoint")
+    let api_key_row = adw::PasswordEntryRow::builder()
+        .title("API Key")
+        .text(cfg.active_key())
         .build();
 
-    let groq_key_row = adw::PasswordEntryRow::builder()
-        .title("Groq API Key")
-        .text(&cfg.groq_api_key)
-        .build();
-    let groq_model_row = adw::EntryRow::builder()
+    let model_row = adw::EntryRow::builder()
         .title("Model")
-        .text(&cfg.groq_model)
-        .build();
-    groq_group.add(&groq_key_row);
-    groq_group.add(&groq_model_row);
-
-    // ── Cohere settings ───────────────────────────────────────────────────────
-    let cohere_group = adw::PreferencesGroup::builder()
-        .title("Cohere")
-        .description("api.cohere.com — Cohere Transcribe endpoint")
+        .text(cfg.active_model())
         .build();
 
-    let cohere_key_row = adw::PasswordEntryRow::builder()
-        .title("Cohere API Key")
-        .text(&cfg.cohere_api_key)
-        .build();
-    let cohere_model_row = adw::EntryRow::builder()
-        .title("Model")
-        .text(&cfg.cohere_model)
-        .build();
-    cohere_group.add(&cohere_key_row);
-    cohere_group.add(&cohere_model_row);
-
-    // ── Custom endpoint settings ──────────────────────────────────────────────
-    let custom_group = adw::PreferencesGroup::builder()
-        .title("Custom Endpoint")
-        .description("Any OpenAI-compatible /audio/transcriptions endpoint")
-        .build();
-
-    let custom_url_row = adw::EntryRow::builder()
+    let url_row = adw::EntryRow::builder()
         .title("API URL")
         .text(&cfg.custom_api_url)
-        .build();
-    let custom_key_row = adw::PasswordEntryRow::builder()
-        .title("API Key")
-        .text(&cfg.custom_api_key)
-        .build();
-    let custom_model_row = adw::EntryRow::builder()
-        .title("Model")
-        .text(&cfg.custom_model)
-        .build();
-    custom_group.add(&custom_url_row);
-    custom_group.add(&custom_key_row);
-    custom_group.add(&custom_model_row);
-
-    // Set initial group visibility based on stored provider
-    let initial_idx = provider_idx(&cfg.provider);
-    groq_group.set_visible(initial_idx == 0);
-    cohere_group.set_visible(initial_idx == 1);
-    custom_group.set_visible(initial_idx == 2);
-
-    provider_row.connect_selected_notify({
-        let groq_group   = groq_group.clone();
-        let cohere_group = cohere_group.clone();
-        let custom_group = custom_group.clone();
-        move |row| {
-            match row.selected() {
-                0 => { groq_group.set_visible(true);  cohere_group.set_visible(false); custom_group.set_visible(false); }
-                1 => { groq_group.set_visible(false); cohere_group.set_visible(true);  custom_group.set_visible(false); }
-                _ => { groq_group.set_visible(false); cohere_group.set_visible(false); custom_group.set_visible(true);  }
-            }
-        }
-    });
-
-    // ── Shared transcription settings ─────────────────────────────────────────
-    let transcription_group = adw::PreferencesGroup::builder()
-        .title("Transcription")
+        .visible(cfg.provider == "custom")
         .build();
 
     let lang_row = adw::EntryRow::builder()
         .title("Language (BCP-47)")
         .text(cfg.language.as_deref().unwrap_or(""))
         .build();
-    transcription_group.add(&lang_row);
 
-    // ── Audio ─────────────────────────────────────────────────────────────────
-    let audio_group = adw::PreferencesGroup::builder().title("Audio").build();
+    drop(cfg);
 
-    let adj = gtk4::Adjustment::builder()
-        .lower(8000.0).upper(48000.0)
-        .step_increment(1000.0).page_increment(8000.0)
-        .value(cfg.sample_rate as f64)
-        .build();
-    let rate_row = adw::SpinRow::builder()
-        .title("Sample Rate (Hz)")
-        .subtitle("16000 Hz recommended for Whisper")
-        .adjustment(&adj)
-        .build();
-    audio_group.add(&rate_row);
+    provider_row.connect_selected_notify({
+        let saver = saver.clone();
+        let api_key_row = api_key_row.clone();
+        let model_row = model_row.clone();
+        let url_row = url_row.clone();
+        move |row| {
+            {
+                let mut cfg = saver.config.borrow_mut();
+                let key   = api_key_row.text().to_string();
+                let model = model_row.text().to_string();
+                let url   = url_row.text().to_string();
+                match cfg.provider.as_str() {
+                    "groq" => {
+                        cfg.groq_api_key = key;
+                        cfg.groq_model   = model;
+                    }
+                    "cohere" => {
+                        cfg.cohere_api_key = key;
+                        cfg.cohere_model   = model;
+                    }
+                    _ => {
+                        cfg.custom_api_key = key;
+                        cfg.custom_model   = model;
+                        cfg.custom_api_url = url;
+                    }
+                }
+                cfg.provider = provider_str(row.selected()).to_string();
+            }
+            let (new_key, new_model, new_url) = {
+                let c = saver.config.borrow();
+                (
+                    c.active_key().to_string(),
+                    c.active_model().to_string(),
+                    c.custom_api_url.clone(),
+                )
+            };
+            api_key_row.set_text(&new_key);
+            model_row.set_text(&new_model);
+            url_row.set_text(&new_url);
+            url_row.set_visible(provider_str(row.selected()) == "custom");
+            saver.save();
+        }
+    });
 
-    // ── Behaviour (reads extension GSettings + local save_history setting) ────
+    api_key_row.connect_changed({
+        let saver = saver.clone();
+        move |row| {
+            let t = row.text().to_string();
+            saver.update(|cfg| match cfg.provider.as_str() {
+                "groq"   => cfg.groq_api_key   = t,
+                "cohere" => cfg.cohere_api_key  = t,
+                _        => cfg.custom_api_key  = t,
+            });
+        }
+    });
+
+    model_row.connect_changed({
+        let saver = saver.clone();
+        move |row| {
+            let t = row.text().to_string();
+            saver.update(|cfg| match cfg.provider.as_str() {
+                "groq"   => cfg.groq_model   = t,
+                "cohere" => cfg.cohere_model  = t,
+                _        => cfg.custom_model  = t,
+            });
+        }
+    });
+
+    url_row.connect_changed({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.custom_api_url = row.text().to_string())
+    });
+
+    lang_row.connect_changed({
+        let saver = saver.clone();
+        move |row| {
+            let t = row.text().to_string();
+            saver.update(|cfg| cfg.language = if t.is_empty() { None } else { Some(t) });
+        }
+    });
+
+    provider_group.add(&provider_row);
+    provider_group.add(&api_key_row);
+    provider_group.add(&model_row);
+    provider_group.add(&url_row);
+    provider_group.add(&lang_row);
+
+    // ── Behaviour group ─────────────────────────────────────────────────────
     let behaviour_group = adw::PreferencesGroup::builder()
         .title("Behaviour")
         .build();
 
     let paste_row = adw::SwitchRow::builder()
         .title("Auto-paste after transcription")
-        .subtitle("Pastes into the focused window (Ctrl+Shift+V for terminals, Ctrl+V elsewhere)")
+        .subtitle("Pastes into the focused window")
         .build();
-
-    let ext_settings: Option<gio::Settings> = (|| {
-        let schema_dir = dirs::home_dir()?
-            .join(".local/share/gnome-shell/extensions/voice-transcriber@local/schemas");
-        let source = gio::SettingsSchemaSource::from_directory(
-            schema_dir, gio::SettingsSchemaSource::default().as_ref(), false,
-        ).ok()?;
-        let schema = source.lookup("org.gnome.shell.extensions.voice-transcriber", false)?;
-        Some(gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
-    })();
-
     if let Some(ref s) = ext_settings {
         paste_row.set_active(s.boolean("auto-paste"));
         paste_row.connect_active_notify({
             let s = s.clone();
-            move |row| { let _ = s.set_boolean("auto-paste", row.is_active()); }
+            move |row| {
+                let _ = s.set_boolean("auto-paste", row.is_active());
+            }
         });
     } else {
         paste_row.set_sensitive(false);
-        paste_row.set_subtitle("Extension not installed — setting unavailable");
+        paste_row.set_subtitle("Extension not installed");
     }
-
-    let history_row = adw::SwitchRow::builder()
-        .title("Save transcription history")
-        .subtitle("Record WAV files and transcription results to disk")
-        .active(cfg.save_history)
-        .build();
 
     let vad_row = adw::SwitchRow::builder()
         .title("Auto-stop on silence")
-        .subtitle("Automatically stop recording after ~1.5 seconds of silence")
-        .active(cfg.vad_enabled)
+        .subtitle("Stop recording after ~1.5 s of silence")
+        .active(saver.config.borrow().vad_enabled)
         .build();
+    vad_row.connect_active_notify({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.vad_enabled = row.is_active())
+    });
 
     let direct_inject_row = adw::SwitchRow::builder()
         .title("Direct text injection")
-        .subtitle("Type text directly into the focused window (no clipboard)")
-        .active(cfg.direct_injection)
+        .subtitle("Type text directly instead of using clipboard")
+        .active(saver.config.borrow().direct_injection)
         .build();
-
     if let Some(ref s) = ext_settings {
-        if s.boolean("direct-injection") { direct_inject_row.set_active(true); }
+        if s.boolean("direct-injection") {
+            direct_inject_row.set_active(true);
+        }
         direct_inject_row.connect_active_notify({
+            let saver = saver.clone();
             let s = s.clone();
-            move |row| { let _ = s.set_boolean("direct-injection", row.is_active()); }
+            move |row| {
+                let v = row.is_active();
+                let _ = s.set_boolean("direct-injection", v);
+                saver.update(|cfg| cfg.direct_injection = v);
+            }
+        });
+    } else {
+        direct_inject_row.connect_active_notify({
+            let saver = saver.clone();
+            move |row| saver.update(|cfg| cfg.direct_injection = row.is_active())
         });
     }
 
     let audio_cues_row = adw::SwitchRow::builder()
         .title("Audio feedback cues")
-        .subtitle("Play a soft sound when recording starts and transcription finishes")
-        .active(cfg.audio_cues_enabled)
+        .subtitle("Sounds on recording start and transcription finish")
+        .active(saver.config.borrow().audio_cues_enabled)
         .build();
+    audio_cues_row.connect_active_notify({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.audio_cues_enabled = row.is_active())
+    });
+
+    let history_row = adw::SwitchRow::builder()
+        .title("Save transcription history")
+        .subtitle("Record WAV files and results to disk")
+        .active(saver.config.borrow().save_history)
+        .build();
+    history_row.connect_active_notify({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.save_history = row.is_active())
+    });
 
     behaviour_group.add(&paste_row);
-    behaviour_group.add(&history_row);
     behaviour_group.add(&vad_row);
     behaviour_group.add(&direct_inject_row);
     behaviour_group.add(&audio_cues_row);
+    behaviour_group.add(&history_row);
 
-    // ── Save button ───────────────────────────────────────────────────────────
-    let actions_group = adw::PreferencesGroup::new();
-    let save_row = adw::ButtonRow::builder()
-        .title("Save Settings")
-        .start_icon_name("document-save-symbolic")
-        .sensitive(false)
+    // ── Streaming group ─────────────────────────────────────────────────────
+    let streaming_group = adw::PreferencesGroup::new();
+
+    let cfg = saver.config.borrow();
+
+    let streaming_expander = adw::ExpanderRow::builder()
+        .title("Real-Time Streaming")
+        .subtitle("WebSocket-based transcription with ~300 ms latency")
+        .show_enable_switch(true)
+        .enable_expansion(cfg.streaming_enabled)
         .build();
-    actions_group.add(&save_row);
 
-    // ── Assemble page ─────────────────────────────────────────────────────────
-    page.add(&provider_group);
-    page.add(&groq_group);
-    page.add(&cohere_group);
-    page.add(&custom_group);
-    page.add(&transcription_group);
-    page.add(&audio_group);
-    page.add(&behaviour_group);
-    page.add(&actions_group);
+    fn streaming_prov_idx(p: &str) -> u32 {
+        if p == "assemblyai" { 1 } else { 0 }
+    }
 
-    // ── Dirty tracking ────────────────────────────────────────────────────────
-    let last_saved = Rc::new(RefCell::new(cfg.clone()));
+    let stream_provider_row = adw::ComboRow::builder()
+        .title("Provider")
+        .model(&gtk4::StringList::new(&["Deepgram", "AssemblyAI"]))
+        .build();
+    stream_provider_row.set_selected(streaming_prov_idx(&cfg.streaming_provider));
 
-    let check_dirty: Rc<dyn Fn()> = {
-        let last_saved       = Rc::clone(&last_saved);
-        let provider_row     = provider_row.clone();
-        let groq_key_row     = groq_key_row.clone();
-        let groq_model_row   = groq_model_row.clone();
-        let cohere_key_row   = cohere_key_row.clone();
-        let cohere_model_row = cohere_model_row.clone();
-        let custom_url_row   = custom_url_row.clone();
-        let custom_key_row   = custom_key_row.clone();
-        let custom_model_row = custom_model_row.clone();
-        let lang_row         = lang_row.clone();
-        let rate_row         = rate_row.clone();
-        let history_row         = history_row.clone();
-        let vad_row             = vad_row.clone();
-        let direct_inject_row   = direct_inject_row.clone();
-        let audio_cues_row      = audio_cues_row.clone();
-        let save_row            = save_row.clone();
-        Rc::new(move || {
-            let s = last_saved.borrow();
-            let dirty =
-                provider_str(provider_row.selected()) != s.provider.as_str()
-                || groq_key_row.text()             != s.groq_api_key.as_str()
-                || groq_model_row.text()           != s.groq_model.as_str()
-                || cohere_key_row.text()           != s.cohere_api_key.as_str()
-                || cohere_model_row.text()         != s.cohere_model.as_str()
-                || custom_url_row.text()           != s.custom_api_url.as_str()
-                || custom_key_row.text()           != s.custom_api_key.as_str()
-                || custom_model_row.text()         != s.custom_model.as_str()
-                || lang_row.text()                 != s.language.as_deref().unwrap_or("")
-                || rate_row.value() as u32         != s.sample_rate
-                || history_row.is_active()         != s.save_history
-                || vad_row.is_active()             != s.vad_enabled
-                || direct_inject_row.is_active()   != s.direct_injection
-                || audio_cues_row.is_active()      != s.audio_cues_enabled;
-            save_row.set_sensitive(dirty);
-        })
-    };
+    let dg_key_row = adw::PasswordEntryRow::builder()
+        .title("Deepgram API Key")
+        .text(&cfg.deepgram_api_key)
+        .visible(streaming_prov_idx(&cfg.streaming_provider) == 0)
+        .build();
 
-    provider_row.connect_selected_notify({    let c = Rc::clone(&check_dirty); move |_| c() });
-    groq_key_row.connect_changed({            let c = Rc::clone(&check_dirty); move |_| c() });
-    groq_model_row.connect_changed({          let c = Rc::clone(&check_dirty); move |_| c() });
-    cohere_key_row.connect_changed({          let c = Rc::clone(&check_dirty); move |_| c() });
-    cohere_model_row.connect_changed({        let c = Rc::clone(&check_dirty); move |_| c() });
-    custom_url_row.connect_changed({          let c = Rc::clone(&check_dirty); move |_| c() });
-    custom_key_row.connect_changed({          let c = Rc::clone(&check_dirty); move |_| c() });
-    custom_model_row.connect_changed({        let c = Rc::clone(&check_dirty); move |_| c() });
-    lang_row.connect_changed({                let c = Rc::clone(&check_dirty); move |_| c() });
-    rate_row.connect_value_notify({           let c = Rc::clone(&check_dirty); move |_| c() });
-    history_row.connect_active_notify({          let c = Rc::clone(&check_dirty); move |_| c() });
-    vad_row.connect_active_notify({              let c = Rc::clone(&check_dirty); move |_| c() });
-    direct_inject_row.connect_active_notify({    let c = Rc::clone(&check_dirty); move |_| c() });
-    audio_cues_row.connect_active_notify({       let c = Rc::clone(&check_dirty); move |_| c() });
+    let dg_model_row = adw::EntryRow::builder()
+        .title("Deepgram Model")
+        .text(&cfg.deepgram_model)
+        .visible(streaming_prov_idx(&cfg.streaming_provider) == 0)
+        .build();
 
-    // ── Save handler ──────────────────────────────────────────────────────────
-    save_row.connect_activated({
-        let provider_row     = provider_row.clone();
-        let groq_key_row     = groq_key_row.clone();
-        let groq_model_row   = groq_model_row.clone();
-        let cohere_key_row   = cohere_key_row.clone();
-        let cohere_model_row = cohere_model_row.clone();
-        let custom_url_row   = custom_url_row.clone();
-        let custom_key_row   = custom_key_row.clone();
-        let custom_model_row = custom_model_row.clone();
-        let lang_row         = lang_row.clone();
-        let rate_row         = rate_row.clone();
-        let history_row         = history_row.clone();
-        let vad_row             = vad_row.clone();
-        let direct_inject_row   = direct_inject_row.clone();
-        let audio_cues_row      = audio_cues_row.clone();
-        let toast_overlay       = toast_overlay.clone();
-        let last_saved       = Rc::clone(&last_saved);
-        let check_dirty      = Rc::clone(&check_dirty);
-        move |_| {
-            let lang = lang_row.text().to_string();
-            let new_cfg = AppConfig {
-                provider:       provider_str(provider_row.selected()).to_string(),
-                groq_api_key:   groq_key_row.text().to_string(),
-                groq_model:     groq_model_row.text().to_string(),
-                cohere_api_key: cohere_key_row.text().to_string(),
-                cohere_model:   cohere_model_row.text().to_string(),
-                custom_api_url: custom_url_row.text().to_string(),
-                custom_api_key: custom_key_row.text().to_string(),
-                custom_model:   custom_model_row.text().to_string(),
-                language:       if lang.is_empty() { None } else { Some(lang) },
-                sample_rate:    rate_row.value() as u32,
-                save_history:       history_row.is_active(),
-                vad_enabled:        vad_row.is_active(),
-                direct_injection:   direct_inject_row.is_active(),
-                audio_cues_enabled: audio_cues_row.is_active(),
-            };
-            let (title, timeout) = match config::save(&new_cfg) {
-                Ok(()) => {
-                    *last_saved.borrow_mut() = new_cfg;
-                    check_dirty();
-                    ("Settings saved", 2)
+    let aai_key_row = adw::PasswordEntryRow::builder()
+        .title("AssemblyAI API Key")
+        .text(&cfg.assemblyai_api_key)
+        .visible(streaming_prov_idx(&cfg.streaming_provider) == 1)
+        .build();
+
+    drop(cfg);
+
+    streaming_expander.connect_enable_expansion_notify({
+        let saver = saver.clone();
+        let direct_inject_row = direct_inject_row.clone();
+        let ext_settings = ext_settings.clone();
+        move |row| {
+            let enabled = row.enables_expansion();
+            if enabled {
+                row.set_expanded(true);
+                direct_inject_row.set_active(true);
+                if let Some(ref s) = ext_settings {
+                    let _ = s.set_boolean("direct-injection", true);
                 }
-                Err(e) => {
-                    eprintln!("save error: {e}");
-                    ("Failed to save — check logs", 4)
-                }
-            };
-            toast_overlay.add_toast(
-                adw::Toast::builder().title(title).timeout(timeout).build(),
-            );
+            }
+            saver.update(|cfg| cfg.streaming_enabled = enabled);
         }
     });
 
+    stream_provider_row.connect_selected_notify({
+        let dg_key   = dg_key_row.clone();
+        let dg_model = dg_model_row.clone();
+        let aai_key  = aai_key_row.clone();
+        let saver    = saver.clone();
+        move |row| {
+            let is_dg = row.selected() == 0;
+            dg_key.set_visible(is_dg);
+            dg_model.set_visible(is_dg);
+            aai_key.set_visible(!is_dg);
+            saver.update(|cfg| {
+                cfg.streaming_provider =
+                    if is_dg { "deepgram" } else { "assemblyai" }.to_string();
+            });
+        }
+    });
+
+    dg_key_row.connect_changed({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.deepgram_api_key = row.text().to_string())
+    });
+    dg_model_row.connect_changed({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.deepgram_model = row.text().to_string())
+    });
+    aai_key_row.connect_changed({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.assemblyai_api_key = row.text().to_string())
+    });
+
+    streaming_expander.add_row(&stream_provider_row);
+    streaming_expander.add_row(&dg_key_row);
+    streaming_expander.add_row(&dg_model_row);
+    streaming_expander.add_row(&aai_key_row);
+    streaming_group.add(&streaming_expander);
+
+    // ── Audio group ─────────────────────────────────────────────────────────
+    let audio_group = adw::PreferencesGroup::builder().title("Audio").build();
+
+    let adj = gtk4::Adjustment::builder()
+        .lower(8000.0)
+        .upper(48000.0)
+        .step_increment(1000.0)
+        .page_increment(8000.0)
+        .value(saver.config.borrow().sample_rate as f64)
+        .build();
+    let rate_row = adw::SpinRow::builder()
+        .title("Sample Rate (Hz)")
+        .subtitle("16 000 Hz recommended for Whisper")
+        .adjustment(&adj)
+        .build();
+    rate_row.connect_value_notify({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.sample_rate = row.value() as u32)
+    });
+    audio_group.add(&rate_row);
+
+    // ── Assemble ────────────────────────────────────────────────────────────
+    page.add(&provider_group);
+    page.add(&behaviour_group);
+    page.add(&streaming_group);
+    page.add(&audio_group);
     page
 }
 
-// ── History page ──────────────────────────────────────────────────────────────
+// ── History ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct HistoryEntry {
@@ -416,9 +602,8 @@ fn db_path() -> Option<std::path::PathBuf> {
 fn load_history() -> Vec<HistoryEntry> {
     let Some(path) = db_path() else { return vec![] };
     if !path.exists() { return vec![]; }
-    let Ok(conn) = Connection::open(&path) else { return vec![]; };
+    let Ok(conn) = Connection::open(&path) else { return vec![] };
 
-    // Migrate schema if needed (daemon does this too, but app may open first).
     for sql in &[
         "ALTER TABLE history ADD COLUMN status   TEXT NOT NULL DEFAULT 'ok'",
         "ALTER TABLE history ADD COLUMN error    TEXT",
@@ -430,7 +615,9 @@ fn load_history() -> Vec<HistoryEntry> {
     let Ok(mut stmt) = conn.prepare(
         "SELECT id, timestamp, text, status, error, wav_path
          FROM history ORDER BY id DESC LIMIT 200",
-    ) else { return vec![] };
+    ) else {
+        return vec![];
+    };
 
     stmt.query_map([], |row| {
         Ok(HistoryEntry {
@@ -447,8 +634,8 @@ fn load_history() -> Vec<HistoryEntry> {
 }
 
 fn delete_history_entry(id: i64, wav_path: Option<&str>) {
-    if let Some(path) = wav_path {
-        let _ = std::fs::remove_file(path);
+    if let Some(p) = wav_path {
+        let _ = std::fs::remove_file(p);
     }
     let Some(db) = db_path() else { return };
     if let Ok(conn) = Connection::open(&db) {
@@ -457,10 +644,11 @@ fn delete_history_entry(id: i64, wav_path: Option<&str>) {
 }
 
 fn clear_history_db() {
-    // Collect all WAV paths first, then delete them, then clear the table.
     let Some(db) = db_path() else { return };
     if let Ok(conn) = Connection::open(&db) {
-        if let Ok(mut stmt) = conn.prepare("SELECT wav_path FROM history WHERE wav_path IS NOT NULL") {
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT wav_path FROM history WHERE wav_path IS NOT NULL")
+        {
             if let Ok(paths) = stmt.query_map([], |row| row.get::<_, String>(0)) {
                 for p in paths.flatten() {
                     let _ = std::fs::remove_file(&p);
@@ -471,105 +659,78 @@ fn clear_history_db() {
     }
 }
 
-fn build_history_page() -> gtk4::Widget {
-    let outer = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .build();
+fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>) {
+    let stack = gtk4::Stack::new();
 
-    // ── Toolbar: Clear All ───────────────────────────────────────────────────
-    let toolbar = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Horizontal)
-        .margin_top(12)
-        .margin_start(12)
-        .margin_end(12)
-        .margin_bottom(0)
+    let empty = adw::StatusPage::builder()
+        .icon_name("document-open-recent-symbolic")
+        .title("No Transcriptions Yet")
+        .description("Your transcription history will appear here")
+        .vexpand(true)
         .build();
+    stack.add_named(&empty, Some("empty"));
 
-    let clear_btn = gtk4::Button::builder()
-        .label("Clear All History")
-        .css_classes(vec!["destructive-action"])
-        .hexpand(true)
-        .build();
-    toolbar.append(&clear_btn);
-    outer.append(&toolbar);
-
-    // ── Scrolled list ────────────────────────────────────────────────────────
     let scrolled = gtk4::ScrolledWindow::builder()
         .vexpand(true)
         .hscrollbar_policy(gtk4::PolicyType::Never)
         .build();
-
     let list_box = gtk4::ListBox::builder()
         .selection_mode(gtk4::SelectionMode::None)
         .css_classes(vec!["boxed-list"])
-        .margin_top(12).margin_bottom(12)
-        .margin_start(12).margin_end(12)
+        .margin_top(12)
+        .margin_bottom(12)
+        .margin_start(12)
+        .margin_end(12)
+        .build();
+    scrolled.set_child(Some(&list_box));
+    stack.add_named(&scrolled, Some("list"));
+
+    let clamp = adw::Clamp::builder()
+        .maximum_size(600)
+        .child(&stack)
+        .vexpand(true)
         .build();
 
-    scrolled.set_child(Some(&list_box));
-    outer.append(&scrolled);
+    let refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
-    // ── Refresh closure (shared with row delete/retry buttons) ───────────────
-    // We use a two-step Rc so rows built during populate can capture refresh.
-    let refresh_holder: Rc<RefCell<Option<Box<dyn Fn()>>>> = Rc::new(RefCell::new(None));
-
-    let refresh_fn = {
-        let list_box       = list_box.clone();
-        let refresh_holder = Rc::clone(&refresh_holder);
-        move || populate_history_list(&list_box, &refresh_holder)
+    let refresh: Rc<dyn Fn()> = {
+        let list_box     = list_box.clone();
+        let stack        = stack.clone();
+        let toast        = toast.clone();
+        let refresh_slot = Rc::clone(&refresh_slot);
+        Rc::new(move || {
+            while let Some(child) = list_box.first_child() {
+                list_box.remove(&child);
+            }
+            let history = load_history();
+            if history.is_empty() {
+                stack.set_visible_child_name("empty");
+            } else {
+                stack.set_visible_child_name("list");
+                let refresh = refresh_slot.borrow().clone().unwrap();
+                for entry in history {
+                    list_box.append(&build_history_row(entry, &refresh, &toast));
+                }
+            }
+        })
     };
-    *refresh_holder.borrow_mut() = Some(Box::new(refresh_fn));
 
-    // Initial populate
-    populate_history_list(&list_box, &refresh_holder);
+    *refresh_slot.borrow_mut() = Some(Rc::clone(&refresh));
+    refresh();
 
-    // ── Clear All handler ────────────────────────────────────────────────────
-    clear_btn.connect_clicked({
-        let refresh_holder = Rc::clone(&refresh_holder);
-        move |_| {
-            clear_history_db();
-            if let Some(f) = refresh_holder.borrow().as_ref() { f(); }
-        }
-    });
-
-    outer.upcast()
-}
-
-fn populate_history_list(
-    list_box:       &gtk4::ListBox,
-    refresh_holder: &Rc<RefCell<Option<Box<dyn Fn()>>>>,
-) {
-    // Remove all existing rows.
-    while let Some(child) = list_box.first_child() {
-        list_box.remove(&child);
-    }
-
-    let history = load_history();
-
-    if history.is_empty() {
-        let empty = adw::ActionRow::builder()
-            .title("No transcriptions yet")
-            .subtitle("Record something to see your history here")
-            .build();
-        list_box.append(&empty);
-        return;
-    }
-
-    for entry in history {
-        let row = build_history_row(entry, refresh_holder);
-        list_box.append(&row);
-    }
+    (clamp.upcast(), refresh)
 }
 
 fn build_history_row(
-    entry:          HistoryEntry,
-    refresh_holder: &Rc<RefCell<Option<Box<dyn Fn()>>>>,
+    entry:   HistoryEntry,
+    refresh: &Rc<dyn Fn()>,
+    toast:   &adw::ToastOverlay,
 ) -> adw::ActionRow {
     let failed = entry.status == "failed";
 
     let title = if failed {
-        let err = entry.error.as_deref().unwrap_or("unknown error");
-        format!("Failed: {}", glib::markup_escape_text(err))
+        let msg = entry.error.as_deref().unwrap_or("unknown error");
+        format!("Failed: {}", glib::markup_escape_text(msg))
     } else {
         glib::markup_escape_text(&entry.text).into()
     };
@@ -580,16 +741,42 @@ fn build_history_row(
         .build();
 
     if failed {
-        row.add_css_class("error");
+        let icon = gtk4::Image::builder()
+            .icon_name("dialog-error-symbolic")
+            .css_classes(vec!["error"])
+            .build();
+        row.add_prefix(&icon);
     }
 
-    // ── Retry button (failed entries with a saved WAV only) ──────────────────
+    // Copy button for successful entries
+    if !failed {
+        let copy_btn = gtk4::Button::builder()
+            .icon_name("edit-copy-symbolic")
+            .valign(gtk4::Align::Center)
+            .css_classes(vec!["flat"])
+            .tooltip_text("Copy to clipboard")
+            .build();
+        copy_btn.connect_clicked({
+            let text  = entry.text.clone();
+            let toast = toast.clone();
+            move |_| {
+                if let Some(display) = gtk4::gdk::Display::default() {
+                    display.clipboard().set_text(&text);
+                }
+                toast.add_toast(
+                    adw::Toast::builder().title("Copied").timeout(2).build(),
+                );
+            }
+        });
+        row.add_suffix(&copy_btn);
+    }
+
+    // Retry button for failed entries with saved audio
     if failed {
         if let Some(ref wav_path) = entry.wav_path {
-            let spinner = gtk4::Spinner::builder()
-                .valign(gtk4::Align::Center)
-                .visible(false)
-                .build();
+            let spinner = adw::Spinner::new();
+            spinner.set_visible(false);
+            spinner.set_valign(gtk4::Align::Center);
 
             let retry_btn = gtk4::Button::builder()
                 .label("Retry")
@@ -601,31 +788,29 @@ fn build_history_row(
             row.add_suffix(&retry_btn);
 
             retry_btn.connect_clicked({
-                let row            = row.clone();
-                let spinner        = spinner.clone();
-                let retry_btn      = retry_btn.clone();
-                let refresh_holder = Rc::clone(refresh_holder);
-                let history_id     = entry.id;
-                let wav_path       = wav_path.clone();
+                let spinner   = spinner.clone();
+                let retry_btn = retry_btn.clone();
+                let refresh   = Rc::clone(refresh);
+                let id        = entry.id;
+                let wav       = wav_path.clone();
 
-                move |btn| {
-                    btn.set_visible(false);
+                move |_| {
+                    retry_btn.set_visible(false);
                     spinner.set_visible(true);
-                    spinner.start();
 
-                    // Call the daemon's RetryTranscription DBus method.
-                    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
-                        spinner.stop();
+                    let Ok(conn) = gio::bus_get_sync(
+                        gio::BusType::Session,
+                        gio::Cancellable::NONE,
+                    ) else {
                         spinner.set_visible(false);
                         retry_btn.set_visible(true);
                         return;
                     };
 
-                    let params = (history_id, wav_path.as_str()).to_variant();
-                    let spinner2  = spinner.clone();
+                    let params     = (id, wav.as_str()).to_variant();
+                    let spinner2   = spinner.clone();
                     let retry_btn2 = retry_btn.clone();
-                    let refresh_holder2 = Rc::clone(&refresh_holder);
-                    let row2 = row.clone();
+                    let refresh2   = Rc::clone(&refresh);
 
                     conn.call(
                         Some(common::dbus::SERVICE_NAME),
@@ -638,21 +823,12 @@ fn build_history_row(
                         30_000,
                         gio::Cancellable::NONE,
                         move |result| {
-                            spinner2.stop();
                             spinner2.set_visible(false);
-
                             match result {
-                                Ok(_) => {
-                                    // Success: refresh the whole list so the row updates.
-                                    if let Some(f) = refresh_holder2.borrow().as_ref() { f(); }
-                                }
-                                Err(e) => {
-                                    // Failed again — show error on the row subtitle and re-show button.
-                                    let msg = e.message();
-                                    row2.set_subtitle(&format!("{} — {msg}", format_timestamp(0)));
+                                Ok(_) => refresh2(),
+                                Err(_) => {
                                     retry_btn2.set_visible(true);
-                                    // Refresh anyway to pick up the updated error stored in DB.
-                                    if let Some(f) = refresh_holder2.borrow().as_ref() { f(); }
+                                    refresh2();
                                 }
                             }
                         },
@@ -662,35 +838,33 @@ fn build_history_row(
         }
     }
 
-    // ── Delete button ────────────────────────────────────────────────────────
-    let delete_btn = gtk4::Button::builder()
+    // Delete button
+    let del_btn = gtk4::Button::builder()
         .icon_name("user-trash-symbolic")
         .valign(gtk4::Align::Center)
         .css_classes(vec!["flat"])
-        .tooltip_text("Delete this entry")
+        .tooltip_text("Delete")
         .build();
-
-    row.add_suffix(&delete_btn);
-
-    delete_btn.connect_clicked({
-        let refresh_holder = Rc::clone(refresh_holder);
-        let id             = entry.id;
-        let wav_path       = entry.wav_path.clone();
+    del_btn.connect_clicked({
+        let refresh = Rc::clone(refresh);
+        let id      = entry.id;
+        let wav     = entry.wav_path.clone();
         move |_| {
-            delete_history_entry(id, wav_path.as_deref());
-            if let Some(f) = refresh_holder.borrow().as_ref() { f(); }
+            delete_history_entry(id, wav.as_deref());
+            refresh();
         }
     });
+    row.add_suffix(&del_btn);
 
     row
 }
 
 fn format_timestamp(ts: i64) -> String {
-    if ts == 0 { return String::new(); }
+    if ts == 0 {
+        return String::new();
+    }
     let elapsed = std::time::SystemTime::now()
-        .duration_since(
-            std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts as u64),
-        )
+        .duration_since(std::time::UNIX_EPOCH + Duration::from_secs(ts as u64))
         .unwrap_or_default()
         .as_secs();
     match elapsed {
@@ -701,14 +875,14 @@ fn format_timestamp(ts: i64) -> String {
     }
 }
 
-// ── Status page ───────────────────────────────────────────────────────────────
+// ── Status page ──────────────────────────────────────────────────────────────
 
 enum FixAction {
     RunCommand {
-        btn_label:   &'static str,
-        cmd_display: &'static str,
-        program:     &'static str,
-        args:        &'static [&'static str],
+        btn_label: &'static str,
+        _cmd:      &'static str,
+        program:   &'static str,
+        args:      &'static [&'static str],
     },
     CopyText {
         btn_label: &'static str,
@@ -762,16 +936,18 @@ fn check_extension_enabled() -> bool {
 }
 
 fn check_api_key() -> bool {
-    config::load().map(|c| !c.active_key().is_empty()).unwrap_or(false)
+    config::load()
+        .map(|c| !c.active_key().is_empty())
+        .unwrap_or(false)
 }
 
 const CHECKS: &[StatusCheck] = &[
     StatusCheck {
         title:    "Daemon installed",
         ok_msg:   "Binary found at ~/.local/bin/voice-transcriber-daemon",
-        fail_msg: "Binary not found — run install.sh from the repository",
-        run:  check_daemon_installed,
-        fix:  Some(FixAction::CopyText {
+        fail_msg: "Binary not found — run install.sh",
+        run:      check_daemon_installed,
+        fix:      Some(FixAction::CopyText {
             btn_label: "Copy command",
             text:      "bash install.sh",
         }),
@@ -779,21 +955,21 @@ const CHECKS: &[StatusCheck] = &[
     StatusCheck {
         title:    "Daemon running",
         ok_msg:   "systemd service is active",
-        fail_msg: "Service is not running — click Start to enable it",
-        run:  check_daemon_running,
-        fix:  Some(FixAction::RunCommand {
-            btn_label:   "Start daemon",
-            cmd_display: "systemctl --user enable --now voice-transcriber-daemon.service",
-            program:     "systemctl",
-            args:        &["--user", "enable", "--now", "voice-transcriber-daemon.service"],
+        fail_msg: "Service not running",
+        run:      check_daemon_running,
+        fix:      Some(FixAction::RunCommand {
+            btn_label: "Start daemon",
+            _cmd:      "systemctl --user enable --now voice-transcriber-daemon.service",
+            program:   "systemctl",
+            args:      &["--user", "enable", "--now", "voice-transcriber-daemon.service"],
         }),
     },
     StatusCheck {
         title:    "Extension installed",
         ok_msg:   "Found in ~/.local/share/gnome-shell/extensions/",
-        fail_msg: "Extension not found — run install.sh from the repository",
-        run:  check_extension_installed,
-        fix:  Some(FixAction::CopyText {
+        fail_msg: "Extension not found — run install.sh",
+        run:      check_extension_installed,
+        fix:      Some(FixAction::CopyText {
             btn_label: "Copy command",
             text:      "bash install.sh",
         }),
@@ -801,402 +977,225 @@ const CHECKS: &[StatusCheck] = &[
     StatusCheck {
         title:    "Extension loaded by GNOME Shell",
         ok_msg:   "GNOME Shell has scanned the extension",
-        fail_msg: "GNOME Shell hasn't loaded the extension yet. On Wayland, log out and back in. On X11, press Alt+F2 → r.",
-        run:  check_extension_loaded,
-        fix:  Some(FixAction::CopyText {
+        fail_msg: "Not loaded yet — log out and back in on Wayland",
+        run:      check_extension_loaded,
+        fix:      Some(FixAction::CopyText {
             btn_label: "Copy logout command",
-            text: "gnome-session-quit --logout",
+            text:      "gnome-session-quit --logout",
         }),
     },
     StatusCheck {
         title:    "Extension enabled",
         ok_msg:   "Enabled in GNOME Shell",
-        fail_msg: "Extension is loaded but not yet enabled",
-        run:  check_extension_enabled,
-        fix:  Some(FixAction::RunCommand {
-            btn_label:   "Enable extension",
-            cmd_display: "gnome-extensions enable voice-transcriber@local",
-            program:     "gnome-extensions",
-            args:        &["enable", "voice-transcriber@local"],
+        fail_msg: "Extension loaded but not enabled",
+        run:      check_extension_enabled,
+        fix:      Some(FixAction::RunCommand {
+            btn_label: "Enable extension",
+            _cmd:      "gnome-extensions enable voice-transcriber@local",
+            program:   "gnome-extensions",
+            args:      &["enable", "voice-transcriber@local"],
         }),
     },
     StatusCheck {
         title:    "API key configured",
         ok_msg:   "API key is set",
-        fail_msg: "No API key — transcription will fail without one",
-        run:  check_api_key,
-        fix:  Some(FixAction::GoToSettings),
+        fail_msg: "No API key — transcription will fail",
+        run:      check_api_key,
+        fix:      Some(FixAction::GoToSettings),
     },
 ];
 
-fn apply_expander_state(
-    expander: &adw::ExpanderRow,
-    icon:     &gtk4::Image,
-    btn:      Option<&gtk4::Button>,
-    check:    &StatusCheck,
-    ok:       bool,
-) {
-    if ok {
-        expander.set_subtitle(check.ok_msg);
-        expander.set_enable_expansion(false);
-        expander.set_expanded(false);
-        icon.set_icon_name(Some("object-select-symbolic"));
-        icon.remove_css_class("warning");
-        icon.add_css_class("success");
-        if let Some(b) = btn { b.set_visible(false); }
-    } else {
-        expander.set_subtitle(check.fail_msg);
-        expander.set_enable_expansion(true);
-        icon.set_icon_name(Some("dialog-warning-symbolic"));
-        icon.remove_css_class("success");
-        icon.add_css_class("warning");
-        if let Some(b) = btn { b.set_visible(true); }
-    }
-}
-
-fn apply_action_state(
-    row:   &adw::ActionRow,
-    icon:  &gtk4::Image,
-    btn:   Option<&gtk4::Button>,
+fn apply_check_state(
+    row:  &adw::ActionRow,
+    icon: &gtk4::Image,
+    btn:  &gtk4::Button,
+    ok:   bool,
     check: &StatusCheck,
-    ok:    bool,
 ) {
     if ok {
         row.set_subtitle(check.ok_msg);
         icon.set_icon_name(Some("object-select-symbolic"));
         icon.remove_css_class("warning");
         icon.add_css_class("success");
-        if let Some(b) = btn { b.set_visible(false); }
+        btn.set_visible(false);
     } else {
         row.set_subtitle(check.fail_msg);
         icon.set_icon_name(Some("dialog-warning-symbolic"));
         icon.remove_css_class("success");
         icon.add_css_class("warning");
-        if let Some(b) = btn { b.set_visible(true); }
+        btn.set_visible(true);
     }
 }
 
-fn build_run_row(
-    check:       &'static StatusCheck,
-    btn_label:   &'static str,
-    cmd_display: &'static str,
-    program:     &'static str,
-    args:        &'static [&'static str],
-) -> (adw::ExpanderRow, Box<dyn Fn()>) {
-    let expander = adw::ExpanderRow::builder()
-        .title(check.title)
-        .show_enable_switch(false)
-        .build();
-
-    let icon = gtk4::Image::new();
-    icon.set_pixel_size(16);
-    icon.set_valign(gtk4::Align::Center);
-
-    let spinner = gtk4::Spinner::builder()
-        .valign(gtk4::Align::Center)
-        .visible(false)
-        .build();
-
-    let run_btn = gtk4::Button::builder()
-        .label(btn_label)
-        .valign(gtk4::Align::Center)
-        .css_classes(vec!["suggested-action"])
-        .visible(false)
-        .build();
-
-    expander.add_suffix(&icon);
-    expander.add_suffix(&run_btn);
-    expander.add_suffix(&spinner);
-
-    let cmd_label = gtk4::Label::builder()
-        .label(format!("$ {cmd_display}"))
-        .halign(gtk4::Align::Start)
-        .selectable(true)
-        .css_classes(vec!["monospace"])
-        .margin_top(10)
-        .margin_bottom(6)
-        .margin_start(18)
-        .margin_end(12)
-        .build();
-
-    let output_label = gtk4::Label::builder()
-        .halign(gtk4::Align::Start)
-        .selectable(true)
-        .wrap(true)
-        .wrap_mode(gtk4::pango::WrapMode::WordChar)
-        .css_classes(vec!["monospace", "caption", "dim-label"])
-        .margin_bottom(10)
-        .margin_start(18)
-        .margin_end(12)
-        .visible(false)
-        .build();
-
-    let content = gtk4::Box::builder()
-        .orientation(gtk4::Orientation::Vertical)
-        .build();
-    content.append(&cmd_label);
-    content.append(&output_label);
-    expander.add_row(&content);
-
-    {
-        let run_btn   = run_btn.clone();
-        let spinner   = spinner.clone();
-        let output    = output_label.clone();
-        let expander  = expander.clone();
-        let icon      = icon.clone();
-
-        run_btn.connect_clicked(move |btn| {
-            btn.set_sensitive(false);
-            btn.set_visible(false);
-            spinner.set_visible(true);
-            spinner.start();
-            output.set_text("Running…");
-            output.set_visible(true);
-            expander.set_expanded(true);
-
-            let (tx, rx) = std::sync::mpsc::sync_channel::<std::io::Result<std::process::Output>>(1);
-            std::thread::spawn(move || {
-                let _ = tx.send(std::process::Command::new(program).args(args).output());
-            });
-
-            let btn2      = btn.clone();
-            let spinner2  = spinner.clone();
-            let output2   = output.clone();
-            let expander2 = expander.clone();
-            let icon2     = icon.clone();
-
-            glib::idle_add_local(move || {
-                let res = match rx.try_recv() {
-                    Ok(r)  => r,
-                    Err(std::sync::mpsc::TryRecvError::Empty) => return glib::ControlFlow::Continue,
-                    Err(_) => return glib::ControlFlow::Break,
-                };
-                spinner2.stop();
-                spinner2.set_visible(false);
-
-                match res {
-                    Ok(out) => {
-                        let stdout = String::from_utf8_lossy(&out.stdout);
-                        let stderr = String::from_utf8_lossy(&out.stderr);
-                        let combined = format!("{stdout}{stderr}").trim().to_string();
-
-                        if out.status.success() {
-                            let msg = if combined.is_empty() {
-                                "Completed successfully.".to_string()
-                            } else {
-                                combined
-                            };
-                            output2.set_text(&msg);
-                            let ok = (check.run)();
-                            apply_expander_state(&expander2, &icon2, Some(&btn2), check, ok);
-                            if !ok {
-                                btn2.set_sensitive(true);
-                            }
-                        } else {
-                            let code = out.status.code().unwrap_or(-1);
-                            let msg = if combined.is_empty() {
-                                format!("Command failed (exit {code})")
-                            } else {
-                                format!("Exit {code}:\n{combined}")
-                            };
-                            output2.set_text(&msg);
-                            btn2.set_sensitive(true);
-                            btn2.set_visible(true);
-                        }
-                    }
-                    Err(e) => {
-                        output2.set_text(&format!("Could not run command: {e}"));
-                        output2.set_visible(true);
-                        btn2.set_sensitive(true);
-                        btn2.set_visible(true);
-                    }
-                }
-                glib::ControlFlow::Break
-            });
-        });
-    }
-
-    apply_expander_state(&expander, &icon, Some(&run_btn), check, (check.run)());
-
-    let refresh: Box<dyn Fn()> = {
-        let expander = expander.clone();
-        let icon     = icon.clone();
-        let run_btn  = run_btn.clone();
-        Box::new(move || {
-            apply_expander_state(&expander, &icon, Some(&run_btn), check, (check.run)())
-        })
-    };
-
-    (expander, refresh)
-}
-
-fn build_copy_row(
-    check:     &'static StatusCheck,
-    btn_label: &'static str,
-    text:      &'static str,
-) -> (adw::ExpanderRow, Box<dyn Fn()>) {
-    let expander = adw::ExpanderRow::builder()
-        .title(check.title)
-        .show_enable_switch(false)
-        .build();
-
-    let icon = gtk4::Image::new();
-    icon.set_pixel_size(16);
-    icon.set_valign(gtk4::Align::Center);
-
-    let copy_btn = gtk4::Button::builder()
-        .label(btn_label)
-        .valign(gtk4::Align::Center)
-        .css_classes(vec!["suggested-action"])
-        .visible(false)
-        .build();
-
-    expander.add_suffix(&icon);
-    expander.add_suffix(&copy_btn);
-
-    let cmd_label = gtk4::Label::builder()
-        .label(format!("$ {text}"))
-        .halign(gtk4::Align::Start)
-        .selectable(true)
-        .css_classes(vec!["monospace"])
-        .margin_top(10)
-        .margin_bottom(10)
-        .margin_start(18)
-        .margin_end(12)
-        .build();
-    expander.add_row(&cmd_label);
-
-    {
-        let copy_btn = copy_btn.clone();
-        copy_btn.connect_clicked(move |btn| {
-            if let Some(display) = gtk4::gdk::Display::default() {
-                display.clipboard().set_text(text);
-            }
-            btn.set_label("Copied!");
-            btn.remove_css_class("suggested-action");
-            btn.add_css_class("success");
-            let btn2 = btn.clone();
-            glib::timeout_add_local_once(Duration::from_secs(2), move || {
-                btn2.set_label(btn_label);
-                btn2.remove_css_class("success");
-                btn2.add_css_class("suggested-action");
-            });
-        });
-    }
-
-    apply_expander_state(&expander, &icon, Some(&copy_btn), check, (check.run)());
-
-    let refresh: Box<dyn Fn()> = {
-        let expander = expander.clone();
-        let icon     = icon.clone();
-        let copy_btn = copy_btn.clone();
-        Box::new(move || {
-            apply_expander_state(&expander, &icon, Some(&copy_btn), check, (check.run)())
-        })
-    };
-
-    (expander, refresh)
-}
-
-fn build_goto_row(
-    check:      &'static StatusCheck,
+fn build_status_page(
+    toast:      &adw::ToastOverlay,
     view_stack: &adw::ViewStack,
-) -> (adw::ActionRow, Box<dyn Fn()>) {
-    let icon = gtk4::Image::new();
-    icon.set_pixel_size(16);
-    icon.set_valign(gtk4::Align::Center);
-
-    let goto_btn = gtk4::Button::builder()
-        .label("Go to Settings")
-        .valign(gtk4::Align::Center)
-        .css_classes(vec!["suggested-action"])
-        .visible(false)
-        .build();
-
-    let row = adw::ActionRow::builder()
-        .title(check.title)
-        .build();
-    row.add_suffix(&icon);
-    row.add_suffix(&goto_btn);
-
-    let vs = view_stack.clone();
-    goto_btn.connect_clicked(move |_| {
-        vs.set_visible_child_name("settings");
-    });
-
-    apply_action_state(&row, &icon, Some(&goto_btn), check, (check.run)());
-
-    let refresh: Box<dyn Fn()> = {
-        let row      = row.clone();
-        let icon     = icon.clone();
-        let goto_btn = goto_btn.clone();
-        Box::new(move || {
-            apply_action_state(&row, &icon, Some(&goto_btn), check, (check.run)())
-        })
-    };
-
-    (row, refresh)
-}
-
-fn build_status_page(view_stack: &adw::ViewStack) -> adw::PreferencesPage {
-    let page  = adw::PreferencesPage::new();
+) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
+    let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::builder()
-        .title("Installation & Configuration")
+        .title("Setup")
+        .description("Verifies installation and configuration")
         .build();
 
-    let refresh_fns: Rc<RefCell<Vec<Box<dyn Fn()>>>> = Rc::new(RefCell::new(Vec::new()));
+    let mut refreshers: Vec<Box<dyn Fn()>> = Vec::new();
 
     for check in CHECKS {
-        match &check.fix {
-            Some(FixAction::RunCommand { btn_label, cmd_display, program, args }) => {
-                let (row, f) = build_run_row(check, btn_label, cmd_display, *program, *args);
-                group.add(&row);
-                refresh_fns.borrow_mut().push(f);
-            }
-            Some(FixAction::CopyText { btn_label, text }) => {
-                let (row, f) = build_copy_row(check, btn_label, text);
-                group.add(&row);
-                refresh_fns.borrow_mut().push(f);
-            }
-            Some(FixAction::GoToSettings) => {
-                let (row, f) = build_goto_row(check, view_stack);
-                group.add(&row);
-                refresh_fns.borrow_mut().push(f);
-            }
-            None => {
-                let expander = adw::ExpanderRow::builder()
-                    .title(check.title)
-                    .show_enable_switch(false)
-                    .build();
-                let icon = gtk4::Image::new();
-                icon.set_pixel_size(16);
-                icon.set_valign(gtk4::Align::Center);
-                expander.add_suffix(&icon);
-                apply_expander_state(&expander, &icon, None, check, (check.run)());
-                let f: Box<dyn Fn()> = {
-                    let expander = expander.clone();
-                    let icon     = icon.clone();
-                    Box::new(move || {
-                        apply_expander_state(&expander, &icon, None, check, (check.run)())
-                    })
-                };
-                group.add(&expander);
-                refresh_fns.borrow_mut().push(f);
+        let row = adw::ActionRow::builder().title(check.title).build();
+
+        let icon = gtk4::Image::new();
+        icon.set_pixel_size(16);
+        icon.set_valign(gtk4::Align::Center);
+        row.add_prefix(&icon);
+
+        let spinner = adw::Spinner::new();
+        spinner.set_visible(false);
+        spinner.set_valign(gtk4::Align::Center);
+        row.add_suffix(&spinner);
+
+        let fix_btn = gtk4::Button::builder()
+            .valign(gtk4::Align::Center)
+            .css_classes(vec!["suggested-action"])
+            .visible(false)
+            .build();
+
+        if let Some(ref fix) = check.fix {
+            match fix {
+                FixAction::RunCommand { btn_label, program, args, .. } => {
+                    fix_btn.set_label(btn_label);
+                    let program = *program;
+                    let args: &'static [&str] = *args;
+
+                    fix_btn.connect_clicked({
+                        let row     = row.clone();
+                        let icon    = icon.clone();
+                        let spinner = spinner.clone();
+                        let fix_btn = fix_btn.clone();
+                        let toast   = toast.clone();
+                        move |_| {
+                            fix_btn.set_visible(false);
+                            spinner.set_visible(true);
+
+                            let (tx, rx) = std::sync::mpsc::sync_channel(1);
+                            std::thread::spawn(move || {
+                                let _ = tx.send(
+                                    std::process::Command::new(program)
+                                        .args(args)
+                                        .output(),
+                                );
+                            });
+
+                            let row2     = row.clone();
+                            let icon2    = icon.clone();
+                            let spinner2 = spinner.clone();
+                            let fix_btn2 = fix_btn.clone();
+                            let toast2   = toast.clone();
+
+                            glib::idle_add_local(move || {
+                                match rx.try_recv() {
+                                    Err(std::sync::mpsc::TryRecvError::Empty) => {
+                                        return glib::ControlFlow::Continue;
+                                    }
+                                    Ok(Ok(out)) if out.status.success() => {
+                                        spinner2.set_visible(false);
+                                        apply_check_state(
+                                            &row2, &icon2, &fix_btn2,
+                                            (check.run)(), check,
+                                        );
+                                    }
+                                    Ok(Ok(out)) => {
+                                        spinner2.set_visible(false);
+                                        fix_btn2.set_visible(true);
+                                        let code = out.status.code().unwrap_or(-1);
+                                        toast2.add_toast(
+                                            adw::Toast::builder()
+                                                .title(&format!(
+                                                    "Command failed (exit {code})"
+                                                ))
+                                                .timeout(4)
+                                                .build(),
+                                        );
+                                    }
+                                    _ => {
+                                        spinner2.set_visible(false);
+                                        fix_btn2.set_visible(true);
+                                    }
+                                }
+                                glib::ControlFlow::Break
+                            });
+                        }
+                    });
+                }
+
+                FixAction::CopyText { btn_label, text } => {
+                    fix_btn.set_label(btn_label);
+                    fix_btn.set_tooltip_text(Some(&format!("Copy: {text}")));
+                    let text = *text;
+
+                    fix_btn.connect_clicked({
+                        let toast = toast.clone();
+                        move |_| {
+                            if let Some(display) = gtk4::gdk::Display::default() {
+                                display.clipboard().set_text(text);
+                            }
+                            toast.add_toast(
+                                adw::Toast::builder()
+                                    .title("Copied to clipboard")
+                                    .timeout(2)
+                                    .build(),
+                            );
+                        }
+                    });
+                }
+
+                FixAction::GoToSettings => {
+                    fix_btn.set_label("Go to Settings");
+                    fix_btn.connect_clicked({
+                        let vs = view_stack.clone();
+                        move |_| vs.set_visible_child_name("settings")
+                    });
+                }
             }
         }
+
+        row.add_suffix(&fix_btn);
+        apply_check_state(&row, &icon, &fix_btn, (check.run)(), check);
+
+        refreshers.push({
+            let row     = row.clone();
+            let icon    = icon.clone();
+            let fix_btn = fix_btn.clone();
+            Box::new(move || {
+                apply_check_state(&row, &icon, &fix_btn, (check.run)(), check)
+            })
+        });
+
+        group.add(&row);
     }
 
-    let refresh_group = adw::PreferencesGroup::new();
-    let recheck_btn = adw::ButtonRow::builder()
+    // Recheck button
+    let recheck_group = adw::PreferencesGroup::new();
+    let recheck = adw::ButtonRow::builder()
         .title("Recheck All")
         .start_icon_name("view-refresh-symbolic")
         .build();
-    recheck_btn.connect_activated(move |_| {
-        for f in refresh_fns.borrow().iter() { f(); }
+
+    let refresh_all: Rc<dyn Fn()> = {
+        let fns = Rc::new(refreshers);
+        Rc::new(move || {
+            for f in fns.iter() {
+                f();
+            }
+        })
+    };
+
+    recheck.connect_activated({
+        let r = Rc::clone(&refresh_all);
+        move |_| r()
     });
-    refresh_group.add(&recheck_btn);
+    recheck_group.add(&recheck);
 
     page.add(&group);
-    page.add(&refresh_group);
-    page
+    page.add(&recheck_group);
+
+    (page, refresh_all)
 }

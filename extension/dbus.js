@@ -16,6 +16,9 @@ const DBUS_XML = `
     <signal name="TranscriptionReady">
       <arg type="s" name="text"/>
     </signal>
+    <signal name="TranscriptionChunk">
+      <arg type="s" name="text"/>
+    </signal>
   </interface>
 </node>`;
 

@@ -2,9 +2,11 @@ use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use anyhow::Result;
+use tokio::sync::mpsc;
 use zbus::{interface, object_server::SignalEmitter, Connection};
 
 use crate::audio::{self, PcmBuffer};
+use crate::streaming::{self, StreamEvent};
 use common::config::AppConfig;
 
 // ── State machine ─────────────────────────────────────────────────────────────
@@ -14,6 +16,7 @@ pub enum DaemonState {
     Idle,
     Recording,
     Transcribing,
+    Streaming,
     Done,
     Error(String),
 }
@@ -24,6 +27,7 @@ impl DaemonState {
             Self::Idle         => "Idle",
             Self::Recording    => "Recording",
             Self::Transcribing => "Transcribing",
+            Self::Streaming    => "Streaming",
             Self::Done         => "Done",
             Self::Error(_)     => "Error",
         }
@@ -39,6 +43,8 @@ pub struct TranscriberInterface {
     pub audio_buf:   Arc<Mutex<Option<PcmBuffer>>>,
     /// Sender to stop the cpal capture thread; None when not recording.
     pub stop_tx:     Arc<Mutex<Option<tokio::sync::watch::Sender<bool>>>>,
+    /// Sender to forward audio chunks to an active streaming session; None otherwise.
+    pub stream_audio_tx: Arc<Mutex<Option<mpsc::Sender<Vec<i16>>>>>,
     pub http_client: reqwest::Client,
     pub db:          Arc<crate::db::Database>,
 }
@@ -58,6 +64,11 @@ impl TranscriberInterface {
     /// Emitted after a successful transcription with the resulting text.
     #[zbus(signal)]
     async fn transcription_ready(emitter: &SignalEmitter<'_>, text: &str) -> zbus::Result<()>;
+
+    /// Emitted during streaming with each finalized phrase.
+    /// The extension should type only the delta since the last chunk.
+    #[zbus(signal)]
+    async fn transcription_chunk(emitter: &SignalEmitter<'_>, text: &str) -> zbus::Result<()>;
 
     /// Current audio input level for VU meter display, in the range 0.0–1.0.
     /// Emitted approximately 30 times per second while recording.
@@ -81,15 +92,24 @@ impl TranscriberInterface {
     ) -> zbus::fdo::Result<()> {
         {
             let state = self.state.lock().unwrap();
-            if *state == DaemonState::Recording || *state == DaemonState::Transcribing {
+            if matches!(*state, DaemonState::Recording | DaemonState::Transcribing | DaemonState::Streaming) {
                 return Err(zbus::fdo::Error::Failed(
                     "already recording or transcribing".into(),
                 ));
             }
         }
 
-        let sample_rate = self.config.lock().unwrap().sample_rate;
-        let vad_enabled = self.config.lock().unwrap().vad_enabled;
+        let sample_rate      = self.config.lock().unwrap().sample_rate;
+        let vad_enabled      = self.config.lock().unwrap().vad_enabled;
+        let streaming_enabled  = self.config.lock().unwrap().streaming_enabled;
+        let direct_injection   = self.config.lock().unwrap().direct_injection;
+
+        if streaming_enabled && !direct_injection {
+            return Err(zbus::fdo::Error::Failed(
+                "streaming transcription requires direct injection to be enabled".into(),
+            ));
+        }
+
         let (buf, stop_tx) =
             audio::start_capture(sample_rate).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
 
@@ -103,114 +123,270 @@ impl TranscriberInterface {
             crate::audio_cues::play_start();
         }
 
-        // Clone Arcs needed by the VAD auto-stop path.
-        let stop_tx_vad   = self.stop_tx.clone();
-        let audio_buf_vad = self.audio_buf.clone();
-        let config_vad    = self.config.clone();
-        let client_vad    = self.http_client.clone();
-        let db_vad        = self.db.clone();
-
-        // Spawn a task that periodically reads the buffer tail, computes RMS,
-        // and emits AudioLevel signals at ~30 Hz for a VU meter.
-        // When VAD is enabled it also monitors for silence and auto-triggers
-        // stop+transcribe after ~1.5 s of silence following detected speech.
-        let state_watch = self.state.clone();
-        let emitter_owned = emitter.to_owned();
-        tokio::spawn(async move {
-            let interval = Duration::from_millis(33);
-            let mut prev_len = 0usize;
-
-            let mut speech_detected = false;
-            let mut silence_ticks   = 0usize;
-            const SILENCE_THRESHOLD_TICKS: usize = 45; // 45 × 33 ms ≈ 1.5 s
-            const SILENCE_LEVEL_CUTOFF:    f64   = 0.05;
-
-            loop {
-                tokio::time::sleep(interval).await;
-
-                if *state_watch.lock().unwrap() != DaemonState::Recording {
-                    break;
+        if streaming_enabled {
+            // ── Streaming path ──────────────────────────────────────────────
+            let cfg = self.config.lock().unwrap().clone();
+            let session = match cfg.streaming_provider.as_str() {
+                "assemblyai" => {
+                    streaming::start_assemblyai_session(
+                        &cfg.assemblyai_api_key,
+                        cfg.sample_rate,
+                        cfg.active_language(),
+                    ).await
                 }
+                _ => {
+                    streaming::start_deepgram_session(
+                        &cfg.deepgram_api_key,
+                        &cfg.deepgram_model,
+                        cfg.sample_rate,
+                        cfg.active_language(),
+                    ).await
+                }
+            };
+            let session = match session {
+                Ok(s)  => s,
+                Err(e) => {
+                    tracing::error!("failed to start streaming session: {e}");
+                    *self.state.lock().unwrap() = DaemonState::Idle;
+                    return Err(zbus::fdo::Error::Failed(e.to_string()));
+                }
+            };
 
-                let level = {
-                    let guard = buf.lock().unwrap();
-                    let samples = &guard[prev_len..];
-                    if samples.is_empty() {
-                        0.0f64
-                    } else {
-                        let rms = (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>()
-                            / samples.len() as f64)
-                            .sqrt();
-                        prev_len = guard.len();
-                        (rms * 25.0).clamp(0.0, 1.0)
+            *self.stream_audio_tx.lock().unwrap() = Some(session.audio_tx);
+
+            // Spawn audio-forward + VU meter + VAD task
+            let stream_audio_tx = self.stream_audio_tx.clone();
+            let stop_tx_vad     = self.stop_tx.clone();
+            let audio_buf_vad   = self.audio_buf.clone();
+            let state_watch     = self.state.clone();
+            let emitter_owned   = emitter.to_owned();
+            tokio::spawn(async move {
+                let interval = Duration::from_millis(33);
+                let mut prev_len = 0usize;
+
+                let mut speech_detected = false;
+                let mut silence_ticks   = 0usize;
+                const SILENCE_THRESHOLD_TICKS: usize = 45;
+                const SILENCE_LEVEL_CUTOFF:    f64   = 0.05;
+
+                loop {
+                    tokio::time::sleep(interval).await;
+
+                    if *state_watch.lock().unwrap() != DaemonState::Recording {
+                        break;
                     }
-                };
 
-                if let Err(e) = Self::audio_level(&emitter_owned, level).await {
-                    tracing::warn!("failed to emit AudioLevel: {e}");
-                    break;
-                }
+                    let (level, new_samples) = {
+                        let guard = buf.lock().unwrap();
+                        let samples = &guard[prev_len..];
+                        if samples.is_empty() {
+                            (0.0f64, vec![])
+                        } else {
+                            let rms = (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>()
+                                / samples.len() as f64)
+                                .sqrt();
+                            let new_i16 = streaming::f32_to_i16(samples);
+                            prev_len = guard.len();
+                            ((rms * 25.0).clamp(0.0, 1.0), new_i16)
+                        }
+                    };
 
-                if vad_enabled {
-                    if level >= SILENCE_LEVEL_CUTOFF {
-                        speech_detected = true;
-                        silence_ticks   = 0;
-                    } else if speech_detected {
-                        silence_ticks += 1;
-                        if silence_ticks >= SILENCE_THRESHOLD_TICKS {
-                            // Step 1: stop audio capture
-                            if let Some(tx) = stop_tx_vad.lock().unwrap().take() {
-                                let _ = tx.send(true);
-                            }
-                            // Step 2: take buffer
-                            let samples: Vec<f32> = audio_buf_vad
-                                .lock().unwrap().take()
-                                .map(|b| b.lock().unwrap().clone())
-                                .unwrap_or_default();
-                            // Step 3: transition state (guard against race with manual stop)
-                            {
-                                let mut st = state_watch.lock().unwrap();
-                                if *st != DaemonState::Recording { break; }
-                                *st = DaemonState::Transcribing;
-                            }
-                            let _ = Self::state_changed(&emitter_owned, "Transcribing").await;
-                            tracing::info!(
-                                "VAD triggered: {} samples, starting transcription",
-                                samples.len()
-                            );
-                            // Step 4: spawn transcription (mirrors stop_recording)
-                            let cfg     = config_vad.lock().unwrap().clone();
-                            let client  = client_vad.clone();
-                            let db      = db_vad.clone();
-                            let state   = state_watch.clone();
-                            let emitter = emitter_owned.clone();
-                            tokio::spawn(async move {
-                                match do_transcription(client, cfg.clone(), samples, db).await {
-                                    Ok(text) => {
-                                        tracing::info!(
-                                            "VAD transcription done: {} chars",
-                                            text.len()
-                                        );
-                                        let _ = Self::transcription_ready(&emitter, &text).await;
-                                        if cfg.audio_cues_enabled {
-                                            crate::audio_cues::play_done();
-                                        }
-                                        *state.lock().unwrap() = DaemonState::Done;
-                                        let _ = Self::state_changed(&emitter, "Done").await;
-                                    }
-                                    Err(e) => {
-                                        tracing::error!("VAD transcription failed: {e}");
-                                        *state.lock().unwrap() = DaemonState::Error(e.to_string());
-                                        let _ = Self::state_changed(&emitter, "Error").await;
-                                    }
+                    // Forward audio chunk to WebSocket
+                    if !new_samples.is_empty() {
+                        let tx_guard = stream_audio_tx.lock().unwrap();
+                        if let Some(tx) = tx_guard.as_ref() {
+                            let _ = tx.try_send(new_samples);
+                        }
+                    }
+
+                    if let Err(e) = Self::audio_level(&emitter_owned, level).await {
+                        tracing::warn!("failed to emit AudioLevel: {e}");
+                        break;
+                    }
+
+                    if vad_enabled {
+                        if level >= SILENCE_LEVEL_CUTOFF {
+                            speech_detected = true;
+                            silence_ticks   = 0;
+                        } else if speech_detected {
+                            silence_ticks += 1;
+                            if silence_ticks >= SILENCE_THRESHOLD_TICKS {
+                                // VAD triggered: drop audio_tx → end-of-stream
+                                if let Some(tx) = stop_tx_vad.lock().unwrap().take() {
+                                    let _ = tx.send(true);
                                 }
-                            });
+                                audio_buf_vad.lock().unwrap().take();
+                                stream_audio_tx.lock().unwrap().take(); // drops sender
+                                {
+                                    let mut st = state_watch.lock().unwrap();
+                                    if *st != DaemonState::Recording { break; }
+                                    *st = DaemonState::Streaming;
+                                }
+                                let _ = Self::state_changed(&emitter_owned, "Streaming").await;
+                                tracing::info!("VAD triggered streaming end-of-stream");
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Spawn event-consumer task
+            let mut event_rx   = session.event_rx;
+            let state_ev       = self.state.clone();
+            let db_ev          = self.db.clone();
+            let emitter_ev     = emitter.to_owned();
+            tokio::spawn(async move {
+                let mut accumulated = String::new();
+                loop {
+                    match event_rx.recv().await {
+                        Some(StreamEvent::Final(phrase)) => {
+                            tracing::debug!("streaming final phrase: {:?}", phrase);
+                            if !accumulated.is_empty() { accumulated.push(' '); }
+                            accumulated.push_str(&phrase);
+                            // Emit accumulated text so extension can compute delta
+                            let _ = Self::transcription_chunk(&emitter_ev, &accumulated).await;
+                        }
+                        Some(StreamEvent::Done) | None => {
+                            tracing::info!("streaming done: {} chars", accumulated.len());
+                            if !accumulated.is_empty() {
+                                let _ = Self::transcription_ready(&emitter_ev, &accumulated).await;
+                                if cfg.audio_cues_enabled {
+                                    crate::audio_cues::play_done();
+                                }
+                                if cfg.save_history {
+                                    let text_clone = accumulated.clone();
+                                    let db = db_ev.clone();
+                                    tokio::task::spawn_blocking(move || {
+                                        db.insert(&text_clone, None)
+                                    }).await.ok();
+                                }
+                            }
+                            *state_ev.lock().unwrap() = DaemonState::Done;
+                            let _ = Self::state_changed(&emitter_ev, "Done").await;
+                            break;
+                        }
+                        Some(StreamEvent::Error(e)) => {
+                            tracing::error!("streaming error: {e}");
+                            *state_ev.lock().unwrap() = DaemonState::Error(e.clone());
+                            let _ = Self::state_changed(&emitter_ev, "Error").await;
                             break;
                         }
                     }
                 }
-            }
-        });
+            });
+        } else {
+            // ── Batch path (original) ────────────────────────────────────────
+
+            // Clone Arcs needed by the VAD auto-stop path.
+            let stop_tx_vad   = self.stop_tx.clone();
+            let audio_buf_vad = self.audio_buf.clone();
+            let config_vad    = self.config.clone();
+            let client_vad    = self.http_client.clone();
+            let db_vad        = self.db.clone();
+
+            // Spawn a task that periodically reads the buffer tail, computes RMS,
+            // and emits AudioLevel signals at ~30 Hz for a VU meter.
+            // When VAD is enabled it also monitors for silence and auto-triggers
+            // stop+transcribe after ~1.5 s of silence following detected speech.
+            let state_watch = self.state.clone();
+            let emitter_owned = emitter.to_owned();
+            tokio::spawn(async move {
+                let interval = Duration::from_millis(33);
+                let mut prev_len = 0usize;
+
+                let mut speech_detected = false;
+                let mut silence_ticks   = 0usize;
+                const SILENCE_THRESHOLD_TICKS: usize = 45; // 45 × 33 ms ≈ 1.5 s
+                const SILENCE_LEVEL_CUTOFF:    f64   = 0.05;
+
+                loop {
+                    tokio::time::sleep(interval).await;
+
+                    if *state_watch.lock().unwrap() != DaemonState::Recording {
+                        break;
+                    }
+
+                    let level = {
+                        let guard = buf.lock().unwrap();
+                        let samples = &guard[prev_len..];
+                        if samples.is_empty() {
+                            0.0f64
+                        } else {
+                            let rms = (samples.iter().map(|s| (*s as f64).powi(2)).sum::<f64>()
+                                / samples.len() as f64)
+                                .sqrt();
+                            prev_len = guard.len();
+                            (rms * 25.0).clamp(0.0, 1.0)
+                        }
+                    };
+
+                    if let Err(e) = Self::audio_level(&emitter_owned, level).await {
+                        tracing::warn!("failed to emit AudioLevel: {e}");
+                        break;
+                    }
+
+                    if vad_enabled {
+                        if level >= SILENCE_LEVEL_CUTOFF {
+                            speech_detected = true;
+                            silence_ticks   = 0;
+                        } else if speech_detected {
+                            silence_ticks += 1;
+                            if silence_ticks >= SILENCE_THRESHOLD_TICKS {
+                                // Step 1: stop audio capture
+                                if let Some(tx) = stop_tx_vad.lock().unwrap().take() {
+                                    let _ = tx.send(true);
+                                }
+                                // Step 2: take buffer
+                                let samples: Vec<f32> = audio_buf_vad
+                                    .lock().unwrap().take()
+                                    .map(|b| b.lock().unwrap().clone())
+                                    .unwrap_or_default();
+                                // Step 3: transition state (guard against race with manual stop)
+                                {
+                                    let mut st = state_watch.lock().unwrap();
+                                    if *st != DaemonState::Recording { break; }
+                                    *st = DaemonState::Transcribing;
+                                }
+                                let _ = Self::state_changed(&emitter_owned, "Transcribing").await;
+                                tracing::info!(
+                                    "VAD triggered: {} samples, starting transcription",
+                                    samples.len()
+                                );
+                                // Step 4: spawn transcription (mirrors stop_recording)
+                                let cfg     = config_vad.lock().unwrap().clone();
+                                let client  = client_vad.clone();
+                                let db      = db_vad.clone();
+                                let state   = state_watch.clone();
+                                let emitter = emitter_owned.clone();
+                                tokio::spawn(async move {
+                                    match do_transcription(client, cfg.clone(), samples, db).await {
+                                        Ok(text) => {
+                                            tracing::info!(
+                                                "VAD transcription done: {} chars",
+                                                text.len()
+                                            );
+                                            let _ = Self::transcription_ready(&emitter, &text).await;
+                                            if cfg.audio_cues_enabled {
+                                                crate::audio_cues::play_done();
+                                            }
+                                            *state.lock().unwrap() = DaemonState::Done;
+                                            let _ = Self::state_changed(&emitter, "Done").await;
+                                        }
+                                        Err(e) => {
+                                            tracing::error!("VAD transcription failed: {e}");
+                                            *state.lock().unwrap() = DaemonState::Error(e.to_string());
+                                            let _ = Self::state_changed(&emitter, "Error").await;
+                                        }
+                                    }
+                                });
+                                break;
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         Ok(())
     }
@@ -224,6 +400,17 @@ impl TranscriberInterface {
             let _ = tx.send(true);
         }
 
+        // Streaming path: drop audio_tx to signal end-of-stream; the event-consumer
+        // task handles the rest and will emit TranscriptionReady when done.
+        if self.stream_audio_tx.lock().unwrap().take().is_some() {
+            self.audio_buf.lock().unwrap().take();
+            *self.state.lock().unwrap() = DaemonState::Streaming;
+            Self::state_changed(&emitter, "Streaming").await?;
+            tracing::info!("streaming: end-of-stream signalled, waiting for final results");
+            return Ok(());
+        }
+
+        // Batch path (original)
         let samples: Vec<f32> = self
             .audio_buf
             .lock()
@@ -273,10 +460,55 @@ impl TranscriberInterface {
         if let Some(tx) = self.stop_tx.lock().unwrap().take() {
             let _ = tx.send(true);
         }
+        // Drop the streaming sender without sending an end-of-stream message so
+        // the event-consumer task exits without emitting TranscriptionReady.
+        self.stream_audio_tx.lock().unwrap().take();
         *self.audio_buf.lock().unwrap() = None;
         *self.state.lock().unwrap() = DaemonState::Idle;
         Self::state_changed(&emitter, "Idle").await?;
         Ok(())
+    }
+
+    /// Return the most recent history entries as JSON.
+    async fn get_history(&self, limit: u32) -> zbus::fdo::Result<String> {
+        let db = self.db.clone();
+        let entries = tokio::task::spawn_blocking(move || db.recent(limit))
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+
+        let json: Vec<serde_json::Value> = entries
+            .into_iter()
+            .map(|e| {
+                serde_json::json!({
+                    "id": e.id,
+                    "timestamp": e.timestamp,
+                    "text": e.text,
+                    "status": e.status,
+                    "error": e.error,
+                    "wav_path": e.wav_path,
+                })
+            })
+            .collect();
+        serde_json::to_string(&json).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Delete a single history entry by id.
+    async fn delete_history_entry(&self, id: i64) -> zbus::fdo::Result<()> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || db.delete_entry(id))
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Delete all history entries.
+    async fn clear_history(&self) -> zbus::fdo::Result<()> {
+        let db = self.db.clone();
+        tokio::task::spawn_blocking(move || db.clear_all())
+            .await
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
     /// Re-transcribe a previously saved WAV file from the history.

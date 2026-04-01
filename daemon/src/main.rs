@@ -3,6 +3,7 @@ mod audio;
 mod audio_cues;
 mod db;
 mod dbus;
+mod streaming;
 
 use anyhow::Result;
 use std::sync::{Arc, Mutex};
@@ -31,11 +32,12 @@ async fn main() -> Result<()> {
     let db = Arc::new(db::Database::open()?);
 
     let iface = dbus::TranscriberInterface {
-        state:       Arc::new(Mutex::new(dbus::DaemonState::Idle)),
-        config:      Arc::new(Mutex::new(cfg)),
-        audio_buf:   Arc::new(Mutex::new(None)),
-        stop_tx:     Arc::new(Mutex::new(None)),
-        http_client: reqwest::Client::new(),
+        state:           Arc::new(Mutex::new(dbus::DaemonState::Idle)),
+        config:          Arc::new(Mutex::new(cfg)),
+        audio_buf:       Arc::new(Mutex::new(None)),
+        stop_tx:         Arc::new(Mutex::new(None)),
+        stream_audio_tx: Arc::new(Mutex::new(None)),
+        http_client:     reqwest::Client::new(),
         db,
     };
 
