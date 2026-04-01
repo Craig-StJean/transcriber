@@ -206,10 +206,14 @@ fn build_ui(app: &adw::Application) {
     view_stack.connect_visible_child_name_notify({
         let clear_btn = clear_btn.clone();
         let status_refresh = Rc::clone(&status_refresh);
+        let history_refresh_tab = Rc::clone(&history_refresh);
         move |stack| {
             let name = stack.visible_child_name();
             let name = name.as_deref();
             clear_btn.set_visible(name == Some("history"));
+            if name == Some("history") {
+                history_refresh_tab();
+            }
             if name == Some("status") {
                 status_refresh();
             }
@@ -241,6 +245,28 @@ fn build_ui(app: &adw::Application) {
             dialog.present(Some(&w));
         }
     });
+
+    // Auto-refresh history when daemon completes a transcription
+    if let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) {
+        let refresh = Rc::clone(&history_refresh);
+        #[allow(deprecated)]
+        conn.signal_subscribe(
+            None,
+            Some(common::dbus::INTERFACE_NAME),
+            Some("StateChanged"),
+            Some(common::dbus::OBJECT_PATH),
+            None,
+            gio::DBusSignalFlags::NONE,
+            move |_conn, _sender, _path, _iface, _signal, params| {
+                let state = params.child_value(0);
+                if let Some(s) = state.get::<String>() {
+                    if s == "Idle" {
+                        refresh();
+                    }
+                }
+            },
+        );
+    }
 
     window.present();
 }
@@ -659,6 +685,35 @@ fn clear_history_db() {
     }
 }
 
+fn wav_duration_secs(path: &str) -> Option<f64> {
+    use std::io::Read;
+    let mut f = std::fs::File::open(path).ok()?;
+    let mut header = [0u8; 44];
+    f.read_exact(&mut header).ok()?;
+    if &header[0..4] != b"RIFF" || &header[8..12] != b"WAVE" {
+        return None;
+    }
+    let channels        = u16::from_le_bytes([header[22], header[23]]) as u32;
+    let sample_rate     = u32::from_le_bytes([header[24], header[25], header[26], header[27]]);
+    let bits_per_sample = u16::from_le_bytes([header[34], header[35]]) as u32;
+    let data_size       = u32::from_le_bytes([header[40], header[41], header[42], header[43]]);
+    if sample_rate == 0 || channels == 0 || bits_per_sample == 0 {
+        return None;
+    }
+    let bytes_per_second = sample_rate * channels * (bits_per_sample / 8);
+    Some(data_size as f64 / bytes_per_second as f64)
+}
+
+fn format_duration(secs: f64) -> String {
+    if secs < 60.0 {
+        format!("{:.1}s", secs)
+    } else {
+        let mins = secs as u64 / 60;
+        let remainder = secs as u64 % 60;
+        format!("{}m {:02}s", mins, remainder)
+    }
+}
+
 fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>) {
     let stack = gtk4::Stack::new();
 
@@ -735,9 +790,16 @@ fn build_history_row(
         glib::markup_escape_text(&entry.text).into()
     };
 
+    let mut subtitle = format_timestamp(entry.timestamp);
+    if let Some(ref wav) = entry.wav_path {
+        if let Some(dur) = wav_duration_secs(wav) {
+            subtitle.push_str(&format!(" \u{00B7} {}", format_duration(dur)));
+        }
+    }
+
     let row = adw::ActionRow::builder()
         .title(title)
-        .subtitle(format_timestamp(entry.timestamp))
+        .subtitle(subtitle)
         .build();
 
     if failed {
@@ -835,6 +897,63 @@ fn build_history_row(
                     );
                 }
             });
+        }
+    }
+
+    // Play button for entries with saved audio
+    if let Some(ref wav_path) = entry.wav_path {
+        if std::path::Path::new(wav_path).exists() {
+            let play_btn = gtk4::Button::builder()
+                .icon_name("media-playback-start-symbolic")
+                .valign(gtk4::Align::Center)
+                .css_classes(vec!["flat"])
+                .tooltip_text("Play recording")
+                .build();
+
+            let media_file: Rc<RefCell<Option<gtk4::MediaFile>>> =
+                Rc::new(RefCell::new(None));
+
+            play_btn.connect_clicked({
+                let wav_path = wav_path.clone();
+                let play_btn = play_btn.clone();
+                let media_file = Rc::clone(&media_file);
+                move |_| {
+                    let mut mf_slot = media_file.borrow_mut();
+
+                    if let Some(ref mf) = *mf_slot {
+                        mf.set_playing(false);
+                        play_btn.set_icon_name("media-playback-start-symbolic");
+                        play_btn.set_tooltip_text(Some("Play recording"));
+                        *mf_slot = None;
+                        return;
+                    }
+
+                    let file = gio::File::for_path(&wav_path);
+                    let mf = gtk4::MediaFile::for_file(&file);
+
+                    mf.connect_ended_notify({
+                        let play_btn = play_btn.clone();
+                        let media_file = Rc::clone(&media_file);
+                        move |mf| {
+                            if mf.is_ended() {
+                                play_btn.set_icon_name(
+                                    "media-playback-start-symbolic",
+                                );
+                                play_btn
+                                    .set_tooltip_text(Some("Play recording"));
+                                *media_file.borrow_mut() = None;
+                            }
+                        }
+                    });
+
+                    mf.play();
+                    play_btn.set_icon_name("media-playback-stop-symbolic");
+                    play_btn.set_tooltip_text(Some("Stop playback"));
+                    *mf_slot = Some(mf);
+                }
+            });
+
+            row.add_suffix(&play_btn);
         }
     }
 
