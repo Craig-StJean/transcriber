@@ -1,0 +1,65 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:latest
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            gcc git \
+            alsa-lib-devel gtk4-devel libadwaita-devel \
+            blueprint-compiler glib2-devel \
+            gtk4-layer-shell-devel
+
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      - name: Build release binaries
+        run: |
+          source "$HOME/.cargo/env"
+          cargo build --release \
+            -p voice-transcriber-daemon \
+            -p voice-transcriber-settings \
+            -p voice-transcriber-overlay
+
+      - name: Package release tarball
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          STAGING="voice-transcriber-${VERSION}"
+          mkdir -p "${STAGING}/bin" "${STAGING}/deploy" "${STAGING}/extension" "${STAGING}/scripts"
+
+          cp target/release/voice-transcriber-daemon   "${STAGING}/bin/"
+          cp target/release/voice-transcriber-settings  "${STAGING}/bin/"
+          cp target/release/voice-transcriber-overlay   "${STAGING}/bin/"
+
+          cp deploy/*.service deploy/*.desktop          "${STAGING}/deploy/"
+          cp deploy/*.timer                             "${STAGING}/deploy/" 2>/dev/null || true
+
+          cp -r extension/*                             "${STAGING}/extension/"
+          cp scripts/check-update.sh                    "${STAGING}/scripts/"
+
+          echo "${VERSION}" > "${STAGING}/VERSION"
+
+          tar czf "voice-transcriber-${VERSION}.tar.gz" "${STAGING}"
+          echo "TARBALL=voice-transcriber-${VERSION}.tar.gz" >> "$GITHUB_ENV"
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.TARBALL }}
+          generate_release_notes: true

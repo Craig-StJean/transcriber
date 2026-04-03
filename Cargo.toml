@@ -2,6 +2,10 @@
 members = ["common", "daemon", "app", "overlay"]
 resolver = "2"
 
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+
 [workspace.dependencies]
 tokio              = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 serde              = { version = "1", features = ["derive"] }
