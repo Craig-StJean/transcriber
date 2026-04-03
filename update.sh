@@ -16,7 +16,18 @@ step() { echo -e "\n${cyan}${bold}::${reset}${bold} $1${reset}"; }
 ok()   { echo -e "   ${green}done${reset} ${dim}$1${reset}"; }
 skip() { echo -e "   ${yellow}skip${reset} ${dim}$1${reset}"; }
 
+DATA_DIR="$HOME/.local/share/voice-transcriber"
+
 echo -e "${bold}Voice Transcriber${reset} ${dim}update${reset}"
+
+# ── Pull latest ──────────────────────────────────────────────────────────────
+
+step "Pulling latest changes..."
+if git -C "$REPO" pull --ff-only 2>&1 | tail -1; then
+    ok "up to date"
+else
+    skip "pull failed (check manually)"
+fi
 
 # ── Build ────────────────────────────────────────────────────────────────────
 
@@ -72,6 +83,20 @@ if [ -d "$EXT_DIR" ]; then
 else
     skip "extension not installed"
 fi
+
+# ── Version file ────────────────────────────────────────────────────────────
+
+step "Updating version file..."
+mkdir -p "$DATA_DIR"
+VERSION="$(grep '^version' "$REPO/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+echo "$VERSION" > "$DATA_DIR/version"
+ok "$VERSION"
+
+# ── Update checker ──────────────────────────────────────────────────────────
+
+step "Updating check-update script..."
+install -m755 "$REPO/scripts/check-update.sh" "$DATA_DIR/"
+ok ""
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 

@@ -21,9 +21,13 @@ mkdir -p "$BIN_DIR"
 install -m755 "$REPO/target/release/voice-transcriber-daemon"  "$BIN_DIR/"
 install -m755 "$REPO/target/release/voice-transcriber-settings" "$BIN_DIR/"
 
+DATA_DIR="$HOME/.local/share/voice-transcriber"
+
 echo "==> Installing systemd user service..."
 mkdir -p "$SYSTEMD_DIR"
 install -m644 "$REPO/deploy/voice-transcriber-daemon.service" "$SYSTEMD_DIR/"
+install -m644 "$REPO/deploy/voice-transcriber-update.service" "$SYSTEMD_DIR/"
+install -m644 "$REPO/deploy/voice-transcriber-update.timer"   "$SYSTEMD_DIR/"
 
 echo "==> Installing DBus activation file..."
 mkdir -p "$DBUS_SERVICES_DIR"
@@ -41,9 +45,19 @@ cp -r "$REPO/extension/"* "$EXT_DIR/"
 echo "==> Compiling GSettings schema..."
 glib-compile-schemas "$EXT_DIR/schemas/"
 
-echo "==> Reloading systemd and enabling daemon..."
+echo "==> Installing update checker..."
+mkdir -p "$DATA_DIR"
+install -m755 "$REPO/scripts/check-update.sh" "$DATA_DIR/"
+
+echo "==> Writing version file..."
+# Read version from Cargo workspace
+VERSION="$(grep '^version' "$REPO/Cargo.toml" | head -1 | sed 's/.*"\(.*\)".*/\1/')"
+echo "$VERSION" > "$DATA_DIR/version"
+
+echo "==> Reloading systemd and enabling services..."
 systemctl --user daemon-reload
 systemctl --user enable --now voice-transcriber-daemon.service
+systemctl --user enable --now voice-transcriber-update.timer
 
 echo ""
 echo "Done!  Next steps:"

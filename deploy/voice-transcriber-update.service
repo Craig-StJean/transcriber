@@ -1,0 +1,8 @@
+[Unit]
+Description=Voice Transcriber update check
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/share/voice-transcriber/check-update.sh
