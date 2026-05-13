@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-Voice Transcriber is a native Linux voice-to-text tool for GNOME/Wayland. Press a global hotkey (Super+`) to record audio, which is sent to a Whisper-compatible API, and the transcribed text is copied to the clipboard or injected directly into the focused window.
+Voice Transcriber is a native Linux voice-to-text tool for GNOME/Wayland. Press a global hotkey (default: Super+apostrophe) to record audio, which is sent to a Whisper-compatible API, and the transcribed text is copied to the clipboard or injected directly into the focused window.
 
 ## Architecture
 
@@ -23,7 +23,7 @@ The daemon is the core — it owns all state, runs as a systemd user service, an
 ### DBus Interface (`org.transcriber.Daemon`)
 
 - **Signals:** `StateChanged(state)`, `TranscriptionReady(text)`, `TranscriptionChunk(text)`, `AudioLevel(level)`
-- **Methods:** `StartRecording`, `StopRecording`, `Cancel`, `GetHistory(limit)`, `DeleteHistoryEntry(id)`, `ClearHistory`, `RetryTranscription(id, wav_path)`
+- **Methods:** `StartRecording`, `StopRecording`, `Cancel`, `GetHistory(limit)`, `DeleteHistoryEntry(id)`, `ClearHistory`, `RetryTranscription(id, wav_path)`, `ReloadConfig`
 - **Property:** `CurrentState` — Idle | Recording | Transcribing | Streaming | Done | Error
 
 ### Daemon State Machine
@@ -66,7 +66,7 @@ alsa-lib-devel gtk4-devel libadwaita-devel blueprint-compiler
 gtk4-layer-shell-devel   # only for overlay crate
 ```
 
-Rust 1.92+, GNOME Shell 45–47, PipeWire or ALSA.
+Rust 1.92+, GNOME Shell 45–50, libadwaita 1.9+, PipeWire or ALSA.
 
 ## Service Management
 

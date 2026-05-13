@@ -4,12 +4,15 @@ use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
 pub struct HistoryEntry {
-    pub id:       i64,
+    pub id:        i64,
     pub timestamp: i64,
-    pub text:     String,
-    pub status:   String,          // "ok" | "failed"
-    pub error:    Option<String>,
-    pub wav_path: Option<String>,
+    pub text:      String,
+    pub status:    String,          // "ok" | "failed"
+    pub error:     Option<String>,
+    pub wav_path:  Option<String>,
+    /// Raw transcription before LLM post-processing was applied. None when
+    /// post-processing was off (in which case `text` is already the raw output).
+    pub text_original: Option<String>,
 }
 
 /// Wrapping `Connection` in `Mutex` makes `Database: Send + Sync`.
@@ -41,9 +44,10 @@ impl Database {
         // Migrate existing databases that lack the newer columns.
         // SQLite returns an error if a column already exists — ignore it.
         for sql in &[
-            "ALTER TABLE history ADD COLUMN status   TEXT NOT NULL DEFAULT 'ok'",
-            "ALTER TABLE history ADD COLUMN error    TEXT",
-            "ALTER TABLE history ADD COLUMN wav_path TEXT",
+            "ALTER TABLE history ADD COLUMN status        TEXT NOT NULL DEFAULT 'ok'",
+            "ALTER TABLE history ADD COLUMN error         TEXT",
+            "ALTER TABLE history ADD COLUMN wav_path      TEXT",
+            "ALTER TABLE history ADD COLUMN text_original TEXT",
         ] {
             let _ = conn.execute(sql, []);
         }
@@ -52,13 +56,14 @@ impl Database {
         Ok(Self { conn: Mutex::new(conn) })
     }
 
-    /// Insert a successful transcription entry.
-    pub fn insert(&self, text: &str, wav_path: Option<&str>) -> Result<()> {
+    /// Insert a successful transcription entry. `text_original` is the raw
+    /// transcript before post-processing; `None` when post-processing was off.
+    pub fn insert(&self, text: &str, text_original: Option<&str>, wav_path: Option<&str>) -> Result<()> {
         let now = now_secs()?;
         self.conn.lock().unwrap().execute(
-            "INSERT INTO history (text, timestamp, status, wav_path)
-             VALUES (?1, ?2, 'ok', ?3)",
-            params![text, now, wav_path],
+            "INSERT INTO history (text, timestamp, status, wav_path, text_original)
+             VALUES (?1, ?2, 'ok', ?3, ?4)",
+            params![text, now, wav_path, text_original],
         )?;
         Ok(())
     }
@@ -111,17 +116,18 @@ impl Database {
     pub fn recent(&self, limit: u32) -> Result<Vec<HistoryEntry>> {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn.prepare(
-            "SELECT id, timestamp, text, status, error, wav_path
+            "SELECT id, timestamp, text, status, error, wav_path, text_original
              FROM history ORDER BY id DESC LIMIT ?1",
         )?;
         let rows = stmt.query_map(params![limit], |row| {
             Ok(HistoryEntry {
-                id:        row.get(0)?,
-                timestamp: row.get(1)?,
-                text:      row.get(2)?,
-                status:    row.get(3)?,
-                error:     row.get(4)?,
-                wav_path:  row.get(5)?,
+                id:            row.get(0)?,
+                timestamp:     row.get(1)?,
+                text:          row.get(2)?,
+                status:        row.get(3)?,
+                error:         row.get(4)?,
+                wav_path:      row.get(5)?,
+                text_original: row.get(6)?,
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)

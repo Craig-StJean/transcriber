@@ -24,7 +24,7 @@ pub trait Daemon {
     async fn cancel(&self) -> zbus::Result<()>;
 
     /// Emitted whenever the daemon state changes.
-    /// Values: "Idle" | "Recording" | "Transcribing" | "Done" | "Error"
+    /// Values: "Idle" | "Recording" | "Transcribing" | "PostProcessing" | "Streaming" | "Done" | "Error"
     #[zbus(signal)]
     async fn state_changed(&self, state: String) -> zbus::Result<()>;
 

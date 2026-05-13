@@ -16,6 +16,7 @@ pub enum DaemonState {
     Idle,
     Recording,
     Transcribing,
+    PostProcessing,
     Streaming,
     Done,
     Error(String),
@@ -24,12 +25,13 @@ pub enum DaemonState {
 impl DaemonState {
     pub fn as_str(&self) -> &str {
         match self {
-            Self::Idle         => "Idle",
-            Self::Recording    => "Recording",
-            Self::Transcribing => "Transcribing",
-            Self::Streaming    => "Streaming",
-            Self::Done         => "Done",
-            Self::Error(_)     => "Error",
+            Self::Idle           => "Idle",
+            Self::Recording      => "Recording",
+            Self::Transcribing   => "Transcribing",
+            Self::PostProcessing => "PostProcessing",
+            Self::Streaming      => "Streaming",
+            Self::Done           => "Done",
+            Self::Error(_)       => "Error",
         }
     }
 }
@@ -57,7 +59,7 @@ impl TranscriberInterface {
     // ── Signals ──────────────────────────────────────────────────────────────
 
     /// Emitted whenever the daemon state changes.
-    /// Possible values: "Idle" | "Recording" | "Transcribing" | "Done" | "Error"
+    /// Possible values: "Idle" | "Recording" | "Transcribing" | "PostProcessing" | "Streaming" | "Done" | "Error"
     #[zbus(signal)]
     async fn state_changed(emitter: &SignalEmitter<'_>, state: &str) -> zbus::Result<()>;
 
@@ -92,7 +94,13 @@ impl TranscriberInterface {
     ) -> zbus::fdo::Result<()> {
         {
             let state = self.state.lock().unwrap();
-            if matches!(*state, DaemonState::Recording | DaemonState::Transcribing | DaemonState::Streaming) {
+            if matches!(
+                *state,
+                DaemonState::Recording
+                    | DaemonState::Transcribing
+                    | DaemonState::PostProcessing
+                    | DaemonState::Streaming
+            ) {
                 return Err(zbus::fdo::Error::Failed(
                     "already recording or transcribing".into(),
                 ));
@@ -101,8 +109,12 @@ impl TranscriberInterface {
 
         let sample_rate      = self.config.lock().unwrap().sample_rate;
         let vad_enabled      = self.config.lock().unwrap().vad_enabled;
-        let streaming_enabled  = self.config.lock().unwrap().streaming_enabled;
-        let direct_injection   = self.config.lock().unwrap().direct_injection;
+        // Post-processing is mutually exclusive with streaming. If both are on
+        // (e.g. the user manually edited config.json), prefer post-processing
+        // and force the batch path.
+        let postprocess_enabled = self.config.lock().unwrap().postprocess_enabled;
+        let streaming_enabled   = self.config.lock().unwrap().streaming_enabled && !postprocess_enabled;
+        let direct_injection    = self.config.lock().unwrap().direct_injection;
 
         if streaming_enabled && !direct_injection {
             return Err(zbus::fdo::Error::Failed(
@@ -258,7 +270,7 @@ impl TranscriberInterface {
                                     let text_clone = accumulated.clone();
                                     let db = db_ev.clone();
                                     tokio::task::spawn_blocking(move || {
-                                        db.insert(&text_clone, None)
+                                        db.insert(&text_clone, None, None)
                                     }).await.ok();
                                 }
                             }
@@ -360,25 +372,7 @@ impl TranscriberInterface {
                                 let state   = state_watch.clone();
                                 let emitter = emitter_owned.clone();
                                 tokio::spawn(async move {
-                                    match do_transcription(client, cfg.clone(), samples, db).await {
-                                        Ok(text) => {
-                                            tracing::info!(
-                                                "VAD transcription done: {} chars",
-                                                text.len()
-                                            );
-                                            let _ = Self::transcription_ready(&emitter, &text).await;
-                                            if cfg.audio_cues_enabled {
-                                                crate::audio_cues::play_done();
-                                            }
-                                            *state.lock().unwrap() = DaemonState::Done;
-                                            let _ = Self::state_changed(&emitter, "Done").await;
-                                        }
-                                        Err(e) => {
-                                            tracing::error!("VAD transcription failed: {e}");
-                                            *state.lock().unwrap() = DaemonState::Error(e.to_string());
-                                            let _ = Self::state_changed(&emitter, "Error").await;
-                                        }
-                                    }
+                                    run_batch_pipeline(client, cfg, samples, db, state, emitter).await;
                                 });
                                 break;
                             }
@@ -431,22 +425,7 @@ impl TranscriberInterface {
         let emitter    = emitter.to_owned();
 
         tokio::spawn(async move {
-            match do_transcription(client, cfg.clone(), samples, db).await {
-                Ok(text) => {
-                    tracing::info!("transcription done: {} chars", text.len());
-                    let _ = Self::transcription_ready(&emitter, &text).await;
-                    if cfg.audio_cues_enabled {
-                        crate::audio_cues::play_done();
-                    }
-                    *state.lock().unwrap() = DaemonState::Done;
-                    let _ = Self::state_changed(&emitter, "Done").await;
-                }
-                Err(e) => {
-                    tracing::error!("transcription failed: {e}");
-                    *state.lock().unwrap() = DaemonState::Error(e.to_string());
-                    let _ = Self::state_changed(&emitter, "Error").await;
-                }
-            }
+            run_batch_pipeline(client, cfg, samples, db, state, emitter).await;
         });
 
         Ok(())
@@ -487,6 +466,7 @@ impl TranscriberInterface {
                     "status": e.status,
                     "error": e.error,
                     "wav_path": e.wav_path,
+                    "text_original": e.text_original,
                 })
             })
             .collect();
@@ -509,6 +489,20 @@ impl TranscriberInterface {
             .await
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Reload the in-memory config from `~/.config/voice-transcriber/config.json`.
+    /// Called by the settings app after the user changes a setting so the next
+    /// recording uses the new values without requiring a daemon restart.
+    /// A reload during an active recording does not affect that pipeline — the
+    /// config is cloned at the moment recording stops, so changes take effect
+    /// from the *following* recording onward.
+    async fn reload_config(&mut self) -> zbus::fdo::Result<()> {
+        let new_cfg = common::config::load()
+            .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))?;
+        *self.config.lock().unwrap() = new_cfg;
+        tracing::info!("config reloaded from disk");
+        Ok(())
     }
 
     /// Re-transcribe a previously saved WAV file from the history.
@@ -619,15 +613,29 @@ async fn transcribe_with_retry(
     Err(last_err)
 }
 
-async fn do_transcription(
+/// Encode samples to WAV, transcribe, optionally post-process through an LLM,
+/// persist to history, and emit the final-state DBus signals.
+///
+/// Drives the full `Transcribing → [PostProcessing →] Done` portion of the
+/// state machine. Used by both the manual-stop and VAD-auto-stop batch paths.
+async fn run_batch_pipeline(
     client: reqwest::Client,
     cfg: AppConfig,
     samples: Vec<f32>,
     db: Arc<crate::db::Database>,
-) -> Result<String> {
-    let wav = audio::encode_wav(&samples, cfg.sample_rate)?;
+    state: Arc<Mutex<DaemonState>>,
+    emitter: SignalEmitter<'static>,
+) {
+    let wav = match audio::encode_wav(&samples, cfg.sample_rate) {
+        Ok(w)  => w,
+        Err(e) => {
+            tracing::error!("failed to encode WAV: {e}");
+            *state.lock().unwrap() = DaemonState::Error(e.to_string());
+            let _ = TranscriberInterface::state_changed(&emitter, "Error").await;
+            return;
+        }
+    };
 
-    // Optionally persist the recording to disk.
     let wav_path: Option<String> = if cfg.save_history {
         match save_wav_to_disk(&wav) {
             Ok(p)  => Some(p.to_string_lossy().into_owned()),
@@ -640,30 +648,71 @@ async fn do_transcription(
         None
     };
 
-    match transcribe_with_retry(&client, &cfg, wav).await {
-        Ok(text) => {
-            if cfg.save_history {
-                let text_clone    = text.clone();
-                let wav_path_copy = wav_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    db.insert(&text_clone, wav_path_copy.as_deref())
-                })
-                .await??;
-            }
-            Ok(text)
-        }
+    let raw = match transcribe_with_retry(&client, &cfg, wav).await {
+        Ok(t)  => t,
         Err(e) => {
+            tracing::error!("transcription failed: {e}");
             if cfg.save_history {
-                let err_str      = e.to_string();
+                let err_str       = e.to_string();
                 let wav_path_copy = wav_path.clone();
-                tokio::task::spawn_blocking(move || {
-                    db.insert_failed(&err_str, wav_path_copy.as_deref())
+                let db2           = db.clone();
+                let _ = tokio::task::spawn_blocking(move || {
+                    db2.insert_failed(&err_str, wav_path_copy.as_deref())
                 })
-                .await??;
+                .await;
             }
-            Err(e)
+            *state.lock().unwrap() = DaemonState::Error(e.to_string());
+            let _ = TranscriberInterface::state_changed(&emitter, "Error").await;
+            return;
         }
+    };
+
+    tracing::info!("transcription done: {} chars", raw.len());
+
+    // Optional post-processing pass.
+    let (final_text, original) = if cfg.postprocess_enabled {
+        *state.lock().unwrap() = DaemonState::PostProcessing;
+        let _ = TranscriberInterface::state_changed(&emitter, "PostProcessing").await;
+        match crate::api::postprocess(
+            &client,
+            cfg.active_postprocess_url(),
+            cfg.active_postprocess_key(),
+            cfg.active_postprocess_model(),
+            &cfg.postprocess_prompt,
+            &raw,
+        )
+        .await
+        {
+            Ok(polished) => {
+                tracing::info!("post-processing done: {} chars", polished.len());
+                (polished, Some(raw))
+            }
+            Err(e) => {
+                tracing::warn!("post-processing failed, falling back to raw: {e}");
+                (raw, None)
+            }
+        }
+    } else {
+        (raw, None)
+    };
+
+    if cfg.save_history {
+        let text_clone     = final_text.clone();
+        let original_clone = original.clone();
+        let wav_path_copy  = wav_path.clone();
+        let db2            = db.clone();
+        let _ = tokio::task::spawn_blocking(move || {
+            db2.insert(&text_clone, original_clone.as_deref(), wav_path_copy.as_deref())
+        })
+        .await;
     }
+
+    let _ = TranscriberInterface::transcription_ready(&emitter, &final_text).await;
+    if cfg.audio_cues_enabled {
+        crate::audio_cues::play_done();
+    }
+    *state.lock().unwrap() = DaemonState::Done;
+    let _ = TranscriberInterface::state_changed(&emitter, "Done").await;
 }
 
 // ── Connection setup (called from main) ──────────────────────────────────────

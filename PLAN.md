@@ -204,21 +204,16 @@ Play subtle, satisfying UI sounds (e.g., a soft "ding") when recording starts an
 ## 6. Real-time Streaming Transcription
 Instead of waiting for the recording to finish, stream the audio chunks to the API via WebSockets or gRPC, allowing the GNOME overlay to display the transcribed text word-by-word as the user speaks.
 
-## 7. libadwaita 1.9 UI Upgrades (when Fedora ships GNOME 50)
-libadwaita 1.9 (released March 2026 with GNOME 50) adds widgets that improve the settings app. Once `libadwaita >= 1.9` is available on the system, apply these changes:
+## 7. GNOME 50 / libadwaita 1.9 Adoption — Done
 
-**Step 1 — Bump the feature flag in `app/Cargo.toml`:**
-```toml
-libadwaita = { version = "0.9", features = ["v1_9"] }
-```
+**Status: Implemented** (May 2026, GNOME 50 / libadwaita 1.9.0 / gtk4 4.22).
 
-**Step 2 — Add `AdwSidebar` to the History page** (`app/src/main.rs`):
-Replace the plain `GtkListBox` history list with an `AdwSidebar` — it gives you free-form filtering, section headers, context menus, and drag-drop reordering. Wire it to a `Gio.ListStore` via `AdwSidebar::bind_model()` and use `AdwPreferencesGroup::bind_model()` (1.8, already enabled) for the main settings group if the API list grows.
+Adopted:
+- `app/Cargo.toml` — feature flag bumped from `v1_8` → `v1_9`.
+- `extension/metadata.json` — `shell-version` extended to include `"50"`; manifest version bumped 1 → 2.
+- `app/src/main.rs` — added `AdwShortcutsDialog` (a libadwaita 1.8 widget) accessible from the menu and via `Ctrl+?`. Reads global hotkeys live from the extension's GSettings schema so user rebinds reflect immediately, with sensible fallbacks if the extension isn't installed.
+- `extension/overlay.js` — gates the fade-in / fade-out `ease()` calls on `St.Settings.get().enable_animations`, honouring GNOME's "Reduce Animation" accessibility toggle.
 
-**Step 3 — Replace `AdwInlineViewSwitcher` with `AdwViewSwitcherSidebar`** for wider windows:
-`AdwViewSwitcherSidebar` is a 1.9 replacement for `GtkStackSidebar` and works natively with `AdwViewStack`. It collapses to a tab bar on narrow widths automatically.
-
-**Check availability before bumping:**
-```bash
-pkg-config --modversion libadwaita-1   # must be >= 1.9
-```
+Speculative items from earlier drafts that were **NOT** adopted, with reasons:
+- **`AdwSidebar` for the History page** — the as-shipped 1.9 widget is a navigation widget designed for `AdwNavigationSplitView` / `AdwOverlaySplitView` (see `docs/libadwaita/04-navigation.md:197`). The history page is a list of past transcriptions with per-row Copy/Retry/Play/Delete buttons; `GtkListBox` with `.boxed-list` is still the documented pattern for that role (`docs/libadwaita/15-widget-selection-and-migration.md:217`).
+- **`AdwViewSwitcherSidebar`** — recommended for 6+ views or sectioned navigation; this app has 3 tabs, where `AdwInlineViewSwitcher` is the right HIG pattern.

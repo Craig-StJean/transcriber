@@ -90,7 +90,9 @@ If the extension does not appear in the list, restart GNOME Shell first:
 
 ### 3. Use it
 
-Press **Super+`** to start recording. Press it again to stop and transcribe.
+Press **Super+'** (Super + apostrophe) to start recording. Press it again to stop and transcribe.
+
+The default keybinding is `<Super>apostrophe`. Rebind it via the **Settings** app, the extension preferences, or GNOME Settings → Keyboard.
 
 ---
 
