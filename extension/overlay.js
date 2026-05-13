@@ -4,6 +4,10 @@ import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 
 const N_BARS = 8;
 
+function _animationsEnabled() {
+    return St.Settings.get().enable_animations;
+}
+
 export class RecordingOverlay {
     constructor() {
         this._box     = null;
@@ -66,8 +70,12 @@ export class RecordingOverlay {
                     monitor.x + Math.round((monitor.width - w) / 2),
                     y,
                 );
-                this._box.ease({ opacity: 255, duration: 120,
-                                  mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+                if (_animationsEnabled()) {
+                    this._box.ease({ opacity: 255, duration: 120,
+                                      mode: Clutter.AnimationMode.EASE_OUT_QUAD });
+                } else {
+                    this._box.set_opacity(255);
+                }
                 this._box.disconnect(this._sigId);
                 this._sigId = 0;
             }
@@ -98,15 +106,21 @@ export class RecordingOverlay {
             onComplete?.();
             return;
         }
-        this._box.ease({
-            opacity: 0,
-            duration,
-            mode: Clutter.AnimationMode.EASE_OUT_QUAD,
-            onComplete: () => {
-                this._destroy();
-                onComplete?.();
-            },
-        });
+        if (_animationsEnabled()) {
+            this._box.ease({
+                opacity: 0,
+                duration,
+                mode: Clutter.AnimationMode.EASE_OUT_QUAD,
+                onComplete: () => {
+                    this._destroy();
+                    onComplete?.();
+                },
+            });
+        } else {
+            this._box.set_opacity(0);
+            this._destroy();
+            onComplete?.();
+        }
     }
 
     _destroy() {

@@ -147,6 +147,10 @@ export default class VoiceTranscriberExtension extends Extension {
             this._overlay.setLevel(0);
             this._overlay.update('Transcribing...');
             break;
+        case 'PostProcessing':
+            this._overlay.setLevel(0);
+            this._overlay.update('Polishing...');
+            break;
         case 'Streaming':
             this._overlay.setLevel(0);
             this._overlay.update('Finalizing...');

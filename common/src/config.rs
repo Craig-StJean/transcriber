@@ -64,6 +64,36 @@ pub struct AppConfig {
     /// AssemblyAI API key (from assemblyai.com).
     #[serde(default)]
     pub assemblyai_api_key: String,
+
+    // ── Post-processing (LLM polish pass) ─────────────────────────────────────
+    /// Send the raw transcript through a chat LLM to fix transcription errors and
+    /// punctuation before delivering. Mutually exclusive with streaming.
+    #[serde(default)]
+    pub postprocess_enabled: bool,
+    /// Active post-processing provider: "groq" | "gemini" | "custom"
+    #[serde(default = "default_postprocess_provider")]
+    pub postprocess_provider: String,
+
+    #[serde(default)]
+    pub postprocess_groq_api_key: String,
+    #[serde(default = "default_postprocess_groq_model")]
+    pub postprocess_groq_model: String,
+
+    #[serde(default)]
+    pub postprocess_gemini_api_key: String,
+    #[serde(default = "default_postprocess_gemini_model")]
+    pub postprocess_gemini_model: String,
+
+    #[serde(default)]
+    pub postprocess_custom_api_url: String,
+    #[serde(default)]
+    pub postprocess_custom_api_key: String,
+    #[serde(default)]
+    pub postprocess_custom_model: String,
+
+    /// System prompt sent to the LLM along with the raw transcript.
+    #[serde(default = "default_postprocess_prompt")]
+    pub postprocess_prompt: String,
 }
 
 fn default_provider()           -> String { "groq".into() }
@@ -72,6 +102,17 @@ fn default_cohere_model()       -> String { "cohere-transcribe-03-2026".into() }
 fn default_streaming_provider() -> String { "deepgram".into() }
 fn default_deepgram_model()     -> String { "nova-3".into() }
 fn default_true()               -> bool   { true }
+
+fn default_postprocess_provider()     -> String { "groq".into() }
+fn default_postprocess_groq_model()   -> String { "llama-3.3-70b-versatile".into() }
+fn default_postprocess_gemini_model() -> String { "gemini-3-flash-preview".into() }
+
+pub const DEFAULT_POSTPROCESS_PROMPT: &str =
+    "You are processing a voice transcription. The text may contain transcription errors, \
+     missing punctuation, or homophone mistakes. Fix these issues and return only the \
+     corrected text — no preamble, no explanations, no quoting.";
+
+fn default_postprocess_prompt() -> String { DEFAULT_POSTPROCESS_PROMPT.into() }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -95,6 +136,16 @@ impl Default for AppConfig {
             deepgram_api_key:     String::new(),
             deepgram_model:       default_deepgram_model(),
             assemblyai_api_key:   String::new(),
+            postprocess_enabled:        false,
+            postprocess_provider:       default_postprocess_provider(),
+            postprocess_groq_api_key:   String::new(),
+            postprocess_groq_model:     default_postprocess_groq_model(),
+            postprocess_gemini_api_key: String::new(),
+            postprocess_gemini_model:   default_postprocess_gemini_model(),
+            postprocess_custom_api_url: String::new(),
+            postprocess_custom_api_key: String::new(),
+            postprocess_custom_model:   String::new(),
+            postprocess_prompt:         default_postprocess_prompt(),
         }
     }
 }
@@ -143,6 +194,33 @@ impl AppConfig {
             Some(lang.unwrap_or("en"))
         } else {
             lang
+        }
+    }
+
+    /// URL of the active post-processing chat-completions endpoint.
+    pub fn active_postprocess_url(&self) -> &str {
+        match self.postprocess_provider.as_str() {
+            "groq"   => "https://api.groq.com/openai/v1/chat/completions",
+            "gemini" => "https://generativelanguage.googleapis.com/v1beta/openai/chat/completions",
+            _        => &self.postprocess_custom_api_url,
+        }
+    }
+
+    /// API key for the active post-processing provider.
+    pub fn active_postprocess_key(&self) -> &str {
+        match self.postprocess_provider.as_str() {
+            "groq"   => &self.postprocess_groq_api_key,
+            "gemini" => &self.postprocess_gemini_api_key,
+            _        => &self.postprocess_custom_api_key,
+        }
+    }
+
+    /// Model name for the active post-processing provider.
+    pub fn active_postprocess_model(&self) -> &str {
+        match self.postprocess_provider.as_str() {
+            "groq"   => &self.postprocess_groq_model,
+            "gemini" => &self.postprocess_gemini_model,
+            _        => &self.postprocess_custom_model,
         }
     }
 }

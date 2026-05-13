@@ -221,8 +221,14 @@ echo -e "${green}${bold}Voice Transcriber $TAG_NAME installed successfully!${res
 echo ""
 echo "Next steps:"
 echo "  1. Open 'Voice Transcriber Settings' from the app launcher, or run: voice-transcriber-settings"
-echo "  2. Enable extension:  gnome-extensions enable voice-transcriber@local"
-echo "     (you may need to log out and back in first)"
-echo "  3. Press Super+\` to start recording."
+if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+    echo "  2. Log out and back in so GNOME Shell picks up the extension."
+    echo "     Then enable it:  gnome-extensions enable voice-transcriber@local"
+    echo "     (Wayland can't reload the shell in place — logout is required.)"
+else
+    echo "  2. Restart GNOME Shell with Alt+F2 → 'r', then enable the extension:"
+    echo "       gnome-extensions enable voice-transcriber@local"
+fi
+echo "  3. Press Super+' (Super + apostrophe) to start recording."
 echo ""
 echo -e "${dim}Auto-updates are enabled. The app will check for updates daily.${reset}"

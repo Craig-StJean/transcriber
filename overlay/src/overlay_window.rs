@@ -144,6 +144,10 @@ impl OverlayWindow {
                 self.set_level(0.0);
                 self.update("Transcribing...");
             }
+            "PostProcessing" => {
+                self.set_level(0.0);
+                self.update("Polishing...");
+            }
             "Done" => {
                 self.update("✓ Copied!");
                 self.schedule_fade(800);

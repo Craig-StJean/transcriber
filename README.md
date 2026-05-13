@@ -4,9 +4,9 @@ A native Linux voice-to-text tool for GNOME on Wayland. Press a global hotkey to
 
 ## How it works
 
-1. Press **Super+`** to start recording
+1. Press **Super+'** (Super + apostrophe) to start recording
 2. An overlay appears showing a live VU meter
-3. Press **Super+`** again to stop
+3. Press **Super+'** again to stop
 4. Audio is sent to a Whisper-compatible API (default: Groq)
 5. Transcribed text is copied to your clipboard automatically
 6. View history and configure settings via the Settings app
@@ -42,7 +42,7 @@ Transcription history is stored in `~/.local/share/voice-transcriber/history.db`
 ## Requirements
 
 - Fedora / GNOME on Wayland
-- GNOME Shell 45–47
+- GNOME Shell 45–50
 - Rust 1.92+
 - PipeWire or ALSA audio
 - An API key for a Whisper-compatible service (e.g. [Groq](https://console.groq.com))
@@ -55,7 +55,7 @@ See [INSTALL.md](INSTALL.md) for full installation instructions.
 bash install.sh
 voice-transcriber-settings   # configure your API key
 gnome-extensions enable voice-transcriber@local
-# press Super+` to record
+# press Super+' to record
 ```
 
 ## Troubleshooting

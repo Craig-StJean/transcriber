@@ -11,10 +11,10 @@ path = "src/main.rs"
 common = { path = "../common", package = "voice-transcriber-common" }
 
 gtk4       = { version = "0.11", features = ["blueprint"] }
-libadwaita = { version = "0.9", features = ["v1_8"] }
-# v1_8 enables: SpinRow/ButtonRow (1.6), InlineViewSwitcher/WrapBox (1.7),
-#               ShortcutsDialog/ShortcutLabel/PreferencesGroup.bind_model (1.8)
-# Bump to v1_9 once libadwaita 1.9 ships in Fedora (GNOME 50+)
+libadwaita = { version = "0.9", features = ["v1_9"] }
+# v1_9 enables: SpinRow/ButtonRow (1.6), InlineViewSwitcher/WrapBox (1.7),
+#               ShortcutsDialog/ShortcutLabel/PreferencesGroup.bind_model (1.8),
+#               Sidebar/ViewSwitcherSidebar/WrapBox/NoneAnimationTarget (1.9)
 
 zbus       = { workspace = true }
 serde      = { workspace = true }

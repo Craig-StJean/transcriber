@@ -45,7 +45,9 @@ impl AutoSaver {
                             .timeout(4)
                             .build(),
                     );
+                    return;
                 }
+                notify_daemon_reload();
             },
         ));
     }
@@ -57,6 +59,27 @@ impl AutoSaver {
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
+
+/// Tell the running daemon to reload its in-memory config from disk.
+/// Silently no-ops if the daemon isn't running or the call fails — the next
+/// time the daemon starts it will load the on-disk config anyway.
+fn notify_daemon_reload() {
+    let Ok(conn) = gio::bus_get_sync(gio::BusType::Session, gio::Cancellable::NONE) else {
+        return;
+    };
+    conn.call(
+        Some(common::dbus::SERVICE_NAME),
+        common::dbus::OBJECT_PATH,
+        common::dbus::INTERFACE_NAME,
+        "ReloadConfig",
+        None,
+        None,
+        gio::DBusCallFlags::NONE,
+        5_000,
+        gio::Cancellable::NONE,
+        |_| {},
+    );
+}
 
 fn provider_idx(p: &str) -> u32 {
     match p { "cohere" => 1, "custom" => 2, _ => 0 }
@@ -82,6 +105,43 @@ fn load_ext_settings() -> Option<gio::Settings> {
     Some(gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
 }
 
+fn build_shortcuts_dialog(ext: &Option<gio::Settings>) -> adw::ShortcutsDialog {
+    let read_accel = |key: &str, fallback: &str| -> String {
+        ext.as_ref()
+            .map(|s| s.strv(key))
+            .and_then(|v| v.first().map(|g| g.to_string()))
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| fallback.to_string())
+    };
+
+    let dialog = adw::ShortcutsDialog::new();
+
+    let recording = adw::ShortcutsSection::new(Some("Recording"));
+    recording.add(adw::ShortcutsItem::new(
+        "Toggle Recording",
+        &read_accel("toggle-recording", "<Super>apostrophe"),
+    ));
+    recording.add(adw::ShortcutsItem::new(
+        "Cancel Recording",
+        &read_accel("cancel-recording", "Escape"),
+    ));
+    dialog.add(recording);
+
+    let app_section = adw::ShortcutsSection::new(Some("Application"));
+    app_section.add(adw::ShortcutsItem::new("Settings",        "<Control>1"));
+    app_section.add(adw::ShortcutsItem::new("Post-Processing", "<Control>2"));
+    app_section.add(adw::ShortcutsItem::new("History",         "<Control>3"));
+    app_section.add(adw::ShortcutsItem::new("Status",          "<Control>4"));
+    app_section.add(adw::ShortcutsItem::new(
+        "Keyboard Shortcuts",
+        "<Control>question",
+    ));
+    app_section.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
+    dialog.add(app_section);
+
+    dialog
+}
+
 // ── Entry point ──────────────────────────────────────────────────────────────
 
 fn main() {
@@ -102,12 +162,60 @@ fn build_ui(app: &adw::Application) {
     // ── Pages ───────────────────────────────────────────────────────────────
     let view_stack = adw::ViewStack::new();
 
+    let (settings_widget, streaming_expander) = build_settings_page(&saver, &ext_settings);
     view_stack.add_titled_with_icon(
-        &build_settings_page(&saver, &ext_settings),
+        &settings_widget,
         Some("settings"),
         "Settings",
         "preferences-system-symbolic",
     );
+
+    let (postprocess_widget, postprocess_switch) = build_postprocess_page(&saver);
+    view_stack.add_titled_with_icon(
+        &postprocess_widget,
+        Some("postprocess"),
+        "Post-Processing",
+        "applications-utilities-symbolic",
+    );
+
+    // Mutual exclusion: streaming and post-processing can't both be on. When
+    // the user flips one on, force the other off and surface a toast.
+    streaming_expander.connect_enable_expansion_notify({
+        let saver = saver.clone();
+        let postprocess_switch = postprocess_switch.clone();
+        let toast_overlay = toast_overlay.clone();
+        move |row| {
+            if row.enables_expansion() && saver.config.borrow().postprocess_enabled {
+                postprocess_switch.set_active(false);
+                saver.update(|cfg| cfg.postprocess_enabled = false);
+                toast_overlay.add_toast(
+                    adw::Toast::builder()
+                        .title("Post-processing disabled — incompatible with streaming")
+                        .timeout(4)
+                        .build(),
+                );
+            }
+        }
+    });
+    postprocess_switch.connect_active_notify({
+        let saver = saver.clone();
+        let streaming_expander = streaming_expander.clone();
+        let toast_overlay = toast_overlay.clone();
+        move |row| {
+            let enabled = row.is_active();
+            saver.update(|cfg| cfg.postprocess_enabled = enabled);
+            if enabled && saver.config.borrow().streaming_enabled {
+                streaming_expander.set_enable_expansion(false);
+                saver.update(|cfg| cfg.streaming_enabled = false);
+                toast_overlay.add_toast(
+                    adw::Toast::builder()
+                        .title("Streaming disabled — incompatible with post-processing")
+                        .timeout(4)
+                        .build(),
+                );
+            }
+        }
+    });
 
     let (history_widget, history_refresh) = build_history_page(&toast_overlay);
     view_stack.add_titled_with_icon(
@@ -130,6 +238,7 @@ fn build_ui(app: &adw::Application) {
     switcher.set_stack(Some(&view_stack));
 
     let menu = gio::Menu::new();
+    menu.append(Some("Keyboard Shortcuts"), Some("app.shortcuts"));
     menu.append(Some("About Voice Transcriber"), Some("app.about"));
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
@@ -180,6 +289,15 @@ fn build_ui(app: &adw::Application) {
     });
     app.add_action(&about_action);
 
+    let shortcuts_action = gio::SimpleAction::new("shortcuts", None);
+    shortcuts_action.connect_activate({
+        let w = window.clone();
+        let ext = ext_settings.clone();
+        move |_, _| build_shortcuts_dialog(&ext).present(Some(&w))
+    });
+    app.add_action(&shortcuts_action);
+    app.set_accels_for_action("app.shortcuts", &["<Control>question", "<Control>F1"]);
+
     let quit_action = gio::SimpleAction::new("quit", None);
     quit_action.connect_activate({
         let a = app.clone();
@@ -188,7 +306,7 @@ fn build_ui(app: &adw::Application) {
     app.add_action(&quit_action);
     app.set_accels_for_action("app.quit", &["<Control>q"]);
 
-    for (i, name) in ["settings", "history", "status"].iter().enumerate() {
+    for (i, name) in ["settings", "postprocess", "history", "status"].iter().enumerate() {
         let action = gio::SimpleAction::new(&format!("go-{name}"), None);
         action.connect_activate({
             let s = view_stack.clone();
@@ -269,7 +387,7 @@ fn build_ui(app: &adw::Application) {
 fn build_settings_page(
     saver: &AutoSaver,
     ext_settings: &Option<gio::Settings>,
-) -> adw::PreferencesPage {
+) -> (adw::PreferencesPage, adw::ExpanderRow) {
     let page = adw::PreferencesPage::new();
 
     // ── Provider group ──────────────────────────────────────────────────────
@@ -599,19 +717,221 @@ fn build_settings_page(
     page.add(&behaviour_group);
     page.add(&streaming_group);
     page.add(&audio_group);
-    page
+    (page, streaming_expander)
+}
+
+// ── Post-processing page ─────────────────────────────────────────────────────
+
+fn postprocess_provider_idx(p: &str) -> u32 {
+    match p { "gemini" => 1, "custom" => 2, _ => 0 }
+}
+
+fn postprocess_provider_str(idx: u32) -> &'static str {
+    match idx { 1 => "gemini", 2 => "custom", _ => "groq" }
+}
+
+fn build_postprocess_page(saver: &AutoSaver) -> (adw::PreferencesPage, adw::SwitchRow) {
+    let page = adw::PreferencesPage::new();
+
+    // ── Enable group ────────────────────────────────────────────────────────
+    let enable_group = adw::PreferencesGroup::builder()
+        .title("Post-Processing")
+        .description(
+            "Run the raw transcription through a chat LLM to fix recognition errors \
+             and punctuation before delivering. Mutually exclusive with streaming.",
+        )
+        .build();
+
+    let enable_row = adw::SwitchRow::builder()
+        .title("Enable post-processing")
+        .subtitle("Disables streaming when turned on")
+        .active(saver.config.borrow().postprocess_enabled)
+        .build();
+    enable_group.add(&enable_row);
+
+    // ── Provider group ──────────────────────────────────────────────────────
+    let provider_group = adw::PreferencesGroup::builder()
+        .title("LLM Provider")
+        .build();
+
+    let provider_row = adw::ComboRow::builder()
+        .title("Provider")
+        .model(&gtk4::StringList::new(&["Groq", "Gemini", "Custom"]))
+        .build();
+
+    let cfg = saver.config.borrow();
+    provider_row.set_selected(postprocess_provider_idx(&cfg.postprocess_provider));
+
+    let api_key_row = adw::PasswordEntryRow::builder()
+        .title("API Key")
+        .text(cfg.active_postprocess_key())
+        .build();
+
+    let model_row = adw::EntryRow::builder()
+        .title("Model")
+        .text(cfg.active_postprocess_model())
+        .build();
+
+    let url_row = adw::EntryRow::builder()
+        .title("API URL")
+        .text(&cfg.postprocess_custom_api_url)
+        .visible(cfg.postprocess_provider == "custom")
+        .build();
+
+    drop(cfg);
+
+    provider_row.connect_selected_notify({
+        let saver = saver.clone();
+        let api_key_row = api_key_row.clone();
+        let model_row = model_row.clone();
+        let url_row = url_row.clone();
+        move |row| {
+            {
+                let mut cfg = saver.config.borrow_mut();
+                let key   = api_key_row.text().to_string();
+                let model = model_row.text().to_string();
+                let url   = url_row.text().to_string();
+                match cfg.postprocess_provider.as_str() {
+                    "groq" => {
+                        cfg.postprocess_groq_api_key = key;
+                        cfg.postprocess_groq_model   = model;
+                    }
+                    "gemini" => {
+                        cfg.postprocess_gemini_api_key = key;
+                        cfg.postprocess_gemini_model   = model;
+                    }
+                    _ => {
+                        cfg.postprocess_custom_api_key = key;
+                        cfg.postprocess_custom_model   = model;
+                        cfg.postprocess_custom_api_url = url;
+                    }
+                }
+                cfg.postprocess_provider =
+                    postprocess_provider_str(row.selected()).to_string();
+            }
+            let (new_key, new_model, new_url) = {
+                let c = saver.config.borrow();
+                (
+                    c.active_postprocess_key().to_string(),
+                    c.active_postprocess_model().to_string(),
+                    c.postprocess_custom_api_url.clone(),
+                )
+            };
+            api_key_row.set_text(&new_key);
+            model_row.set_text(&new_model);
+            url_row.set_text(&new_url);
+            url_row.set_visible(postprocess_provider_str(row.selected()) == "custom");
+            saver.save();
+        }
+    });
+
+    api_key_row.connect_changed({
+        let saver = saver.clone();
+        move |row| {
+            let t = row.text().to_string();
+            saver.update(|cfg| match cfg.postprocess_provider.as_str() {
+                "groq"   => cfg.postprocess_groq_api_key   = t,
+                "gemini" => cfg.postprocess_gemini_api_key = t,
+                _        => cfg.postprocess_custom_api_key = t,
+            });
+        }
+    });
+
+    model_row.connect_changed({
+        let saver = saver.clone();
+        move |row| {
+            let t = row.text().to_string();
+            saver.update(|cfg| match cfg.postprocess_provider.as_str() {
+                "groq"   => cfg.postprocess_groq_model   = t,
+                "gemini" => cfg.postprocess_gemini_model = t,
+                _        => cfg.postprocess_custom_model = t,
+            });
+        }
+    });
+
+    url_row.connect_changed({
+        let saver = saver.clone();
+        move |row| saver.update(|cfg| cfg.postprocess_custom_api_url = row.text().to_string())
+    });
+
+    provider_group.add(&provider_row);
+    provider_group.add(&api_key_row);
+    provider_group.add(&model_row);
+    provider_group.add(&url_row);
+
+    // ── Prompt group ────────────────────────────────────────────────────────
+    let prompt_group = adw::PreferencesGroup::builder()
+        .title("System Prompt")
+        .description("Sent to the LLM along with the raw transcript.")
+        .build();
+
+    let prompt_buffer = gtk4::TextBuffer::new(None);
+    prompt_buffer.set_text(&saver.config.borrow().postprocess_prompt);
+
+    let prompt_view = gtk4::TextView::builder()
+        .buffer(&prompt_buffer)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(8)
+        .right_margin(8)
+        .build();
+
+    let prompt_scroll = gtk4::ScrolledWindow::builder()
+        .height_request(160)
+        .child(&prompt_view)
+        .build();
+
+    let prompt_frame = gtk4::Frame::builder()
+        .child(&prompt_scroll)
+        .build();
+    prompt_frame.add_css_class("card");
+
+    prompt_buffer.connect_changed({
+        let saver = saver.clone();
+        move |buf| {
+            let t = buf.text(&buf.start_iter(), &buf.end_iter(), false).to_string();
+            saver.update(|cfg| cfg.postprocess_prompt = t);
+        }
+    });
+
+    let reset_btn = gtk4::Button::builder()
+        .label("Reset to Default")
+        .halign(gtk4::Align::End)
+        .build();
+    reset_btn.connect_clicked({
+        let prompt_buffer = prompt_buffer.clone();
+        move |_| {
+            prompt_buffer.set_text(config::DEFAULT_POSTPROCESS_PROMPT);
+        }
+    });
+
+    let prompt_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    prompt_box.append(&prompt_frame);
+    prompt_box.append(&reset_btn);
+    prompt_group.add(&prompt_box);
+
+    // ── Assemble ────────────────────────────────────────────────────────────
+    page.add(&enable_group);
+    page.add(&provider_group);
+    page.add(&prompt_group);
+    (page, enable_row)
 }
 
 // ── History ──────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
 struct HistoryEntry {
-    id:        i64,
-    timestamp: i64,
-    text:      String,
-    status:    String,
-    error:     Option<String>,
-    wav_path:  Option<String>,
+    id:            i64,
+    timestamp:     i64,
+    text:          String,
+    status:        String,
+    error:         Option<String>,
+    wav_path:      Option<String>,
+    text_original: Option<String>,
 }
 
 fn db_path() -> Option<std::path::PathBuf> {
@@ -632,15 +952,16 @@ fn load_history() -> Vec<HistoryEntry> {
     let Ok(conn) = Connection::open(&path) else { return vec![] };
 
     for sql in &[
-        "ALTER TABLE history ADD COLUMN status   TEXT NOT NULL DEFAULT 'ok'",
-        "ALTER TABLE history ADD COLUMN error    TEXT",
-        "ALTER TABLE history ADD COLUMN wav_path TEXT",
+        "ALTER TABLE history ADD COLUMN status        TEXT NOT NULL DEFAULT 'ok'",
+        "ALTER TABLE history ADD COLUMN error         TEXT",
+        "ALTER TABLE history ADD COLUMN wav_path      TEXT",
+        "ALTER TABLE history ADD COLUMN text_original TEXT",
     ] {
         let _ = conn.execute(sql, []);
     }
 
     let Ok(mut stmt) = conn.prepare(
-        "SELECT id, timestamp, text, status, error, wav_path
+        "SELECT id, timestamp, text, status, error, wav_path, text_original
          FROM history ORDER BY id DESC LIMIT 200",
     ) else {
         return vec![];
@@ -648,12 +969,13 @@ fn load_history() -> Vec<HistoryEntry> {
 
     stmt.query_map([], |row| {
         Ok(HistoryEntry {
-            id:        row.get(0)?,
-            timestamp: row.get(1)?,
-            text:      row.get(2)?,
-            status:    row.get(3)?,
-            error:     row.get(4)?,
-            wav_path:  row.get(5)?,
+            id:            row.get(0)?,
+            timestamp:     row.get(1)?,
+            text:          row.get(2)?,
+            status:        row.get(3)?,
+            error:         row.get(4)?,
+            wav_path:      row.get(5)?,
+            text_original: row.get(6)?,
         })
     })
     .map(|rows| rows.flatten().collect())
@@ -749,15 +1071,21 @@ fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>)
 
     let refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
+    // (timestamp_unix_secs, row, cached " · <duration>" suffix or "")
+    let row_tracker: Rc<RefCell<Vec<(i64, adw::ActionRow, String)>>> =
+        Rc::new(RefCell::new(Vec::new()));
+
     let refresh: Rc<dyn Fn()> = {
         let list_box     = list_box.clone();
         let stack        = stack.clone();
         let toast        = toast.clone();
         let refresh_slot = Rc::clone(&refresh_slot);
+        let row_tracker  = Rc::clone(&row_tracker);
         Rc::new(move || {
             while let Some(child) = list_box.first_child() {
                 list_box.remove(&child);
             }
+            row_tracker.borrow_mut().clear();
             let history = load_history();
             if history.is_empty() {
                 stack.set_visible_child_name("empty");
@@ -765,7 +1093,11 @@ fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>)
                 stack.set_visible_child_name("list");
                 let refresh = refresh_slot.borrow().clone().unwrap();
                 for entry in history {
-                    list_box.append(&build_history_row(entry, &refresh, &toast));
+                    let ts = entry.timestamp;
+                    let (row, duration_suffix) =
+                        build_history_row(entry, &refresh, &toast);
+                    list_box.append(&row);
+                    row_tracker.borrow_mut().push((ts, row, duration_suffix));
                 }
             }
         })
@@ -774,6 +1106,16 @@ fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>)
     *refresh_slot.borrow_mut() = Some(Rc::clone(&refresh));
     refresh();
 
+    {
+        let row_tracker = Rc::clone(&row_tracker);
+        glib::timeout_add_seconds_local(30, move || {
+            for (ts, row, suffix) in row_tracker.borrow().iter() {
+                row.set_subtitle(&format!("{}{}", format_timestamp(*ts), suffix));
+            }
+            glib::ControlFlow::Continue
+        });
+    }
+
     (clamp.upcast(), refresh)
 }
 
@@ -781,7 +1123,7 @@ fn build_history_row(
     entry:   HistoryEntry,
     refresh: &Rc<dyn Fn()>,
     toast:   &adw::ToastOverlay,
-) -> adw::ActionRow {
+) -> (adw::ActionRow, String) {
     let failed = entry.status == "failed";
 
     let title = if failed {
@@ -791,12 +1133,13 @@ fn build_history_row(
         glib::markup_escape_text(&entry.text).into()
     };
 
-    let mut subtitle = format_timestamp(entry.timestamp);
-    if let Some(ref wav) = entry.wav_path {
-        if let Some(dur) = wav_duration_secs(wav) {
-            subtitle.push_str(&format!(" \u{00B7} {}", format_duration(dur)));
-        }
-    }
+    let duration_suffix = entry
+        .wav_path
+        .as_ref()
+        .and_then(|wav| wav_duration_secs(wav))
+        .map(|dur| format!(" \u{00B7} {}", format_duration(dur)))
+        .unwrap_or_default();
+    let subtitle = format!("{}{}", format_timestamp(entry.timestamp), duration_suffix);
 
     let row = adw::ActionRow::builder()
         .title(title)
@@ -809,6 +1152,14 @@ fn build_history_row(
             .css_classes(vec!["error"])
             .build();
         row.add_prefix(&icon);
+    } else if let Some(raw) = entry.text_original.as_deref() {
+        if raw != entry.text {
+            let icon = gtk4::Image::builder()
+                .icon_name("starred-symbolic")
+                .tooltip_text(format!("Polished. Original: {raw}"))
+                .build();
+            row.add_prefix(&icon);
+        }
     }
 
     // Copy button for successful entries
@@ -976,7 +1327,7 @@ fn build_history_row(
     });
     row.add_suffix(&del_btn);
 
-    row
+    (row, duration_suffix)
 }
 
 fn format_timestamp(ts: i64) -> String {
