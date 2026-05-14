@@ -144,6 +144,10 @@ impl OverlayWindow {
                 self.set_level(0.0);
                 self.update("Transcribing...");
             }
+            "Streaming" => {
+                self.set_level(0.0);
+                self.update("Finalizing...");
+            }
             "PostProcessing" => {
                 self.set_level(0.0);
                 self.update("Polishing...");
