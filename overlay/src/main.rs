@@ -61,21 +61,52 @@ fn main() {
         // async-channel futures are executor-agnostic so they work with glib's
         // spawn_local just as well as with tokio's spawn_local.
         glib::MainContext::default().spawn_local(async move {
+            // Cursor into the running streaming transcript — chunks are cumulative,
+            // so we type only the new suffix on each emission.
+            let mut last_chunk: String = String::new();
             while let Ok(event) = event_rx.recv().await {
                 match event {
                     DaemonEvent::StateChanged(ref s) => {
+                        if s == "Idle" || s == "Recording" {
+                            last_chunk.clear();
+                        }
                         overlay_rx.handle_state(s);
                     }
                     DaemonEvent::AudioLevel(level) => {
                         overlay_rx.set_level(level);
                     }
+                    DaemonEvent::TranscriptionChunk(ref text) => {
+                        // Only streaming + direct_injection produces a usable UX here.
+                        // In clipboard mode the final TranscriptionReady wins; skip.
+                        if direct_injection && text.starts_with(&last_chunk) {
+                            let delta = &text[last_chunk.len()..];
+                            if !delta.is_empty() {
+                                use enigo::{Enigo, Keyboard, Settings};
+                                match Enigo::new(&Settings::default()) {
+                                    Ok(mut e) => { let _ = e.text(delta); }
+                                    Err(err)  => tracing::warn!("direct inject (chunk) failed: {err}"),
+                                }
+                            }
+                            last_chunk = text.clone();
+                        }
+                    }
                     DaemonEvent::TranscriptionReady(ref text) => {
                         if direct_injection {
-                            use enigo::{Enigo, Keyboard, Settings};
-                            match Enigo::new(&Settings::default()) {
-                                Ok(mut e) => { let _ = e.text(text); }
-                                Err(err)  => tracing::warn!("direct inject failed: {err}"),
+                            // If streaming already typed everything, this is a no-op.
+                            // Otherwise (batch path) type the whole thing.
+                            let to_type: &str = if text.starts_with(&last_chunk) {
+                                &text[last_chunk.len()..]
+                            } else {
+                                text
+                            };
+                            if !to_type.is_empty() {
+                                use enigo::{Enigo, Keyboard, Settings};
+                                match Enigo::new(&Settings::default()) {
+                                    Ok(mut e) => { let _ = e.text(to_type); }
+                                    Err(err)  => tracing::warn!("direct inject failed: {err}"),
+                                }
                             }
+                            last_chunk.clear();
                         } else {
                             // Inject transcribed text into the Wayland clipboard via GDK.
                             // Works because this process has an active Wayland display

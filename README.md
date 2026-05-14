@@ -1,6 +1,11 @@
 # Voice Transcriber
 
-A native Linux voice-to-text tool for GNOME on Wayland. Press a global hotkey to record, and your transcribed text is automatically copied to the clipboard.
+A native Linux voice-to-text tool for Wayland. Press a global hotkey to record, and your transcribed text is automatically copied to the clipboard.
+
+Supported sessions:
+
+- **GNOME on Fedora** (and similar) — via the bundled GNOME Shell extension. Install with `bash install.sh`.
+- **Hyprland / wlroots / KDE Plasma 6** — via the `voice-transcriber-overlay` binary (`gtk4-layer-shell` + DBus hotkeys). On NixOS, install via the flake (see [docs/hyprland.md](docs/hyprland.md)).
 
 ## How it works
 
@@ -13,15 +18,16 @@ A native Linux voice-to-text tool for GNOME on Wayland. Press a global hotkey to
 
 ## Architecture
 
-The project has three components communicating over DBus:
+The project has four components communicating over DBus:
 
 | Component | Language | Role |
 |-----------|----------|------|
 | **Daemon** | Rust | Headless service — audio capture, API calls, clipboard injection, history DB |
 | **Settings App** | Rust + GTK4/Libadwaita | GUI for configuration and transcription history |
-| **GNOME Extension** | JavaScript (GJS) | Hotkey binding and on-screen recording overlay |
+| **Overlay** | Rust + GTK4 (`gtk4-layer-shell`) | On-screen VU meter for wlroots/KDE compositors (Hyprland, Sway, Plasma) |
+| **GNOME Extension** | JavaScript (GJS) | Hotkey binding and on-screen overlay for GNOME Shell |
 
-The daemon runs as a systemd user service and is activated on first DBus contact. The GNOME extension only handles display; the daemon handles everything else.
+Pick one of **Overlay** or **GNOME Extension** depending on your session. The daemon runs as a systemd user service and is activated on first DBus contact.
 
 ## Configuration
 
@@ -41,13 +47,14 @@ Transcription history is stored in `~/.local/share/voice-transcriber/history.db`
 
 ## Requirements
 
-- Fedora / GNOME on Wayland
-- GNOME Shell 45–50
-- Rust 1.92+
+- A Wayland session: GNOME (Fedora/Ubuntu), Hyprland, Sway, or KDE Plasma 6
+- Rust 1.92+ (only when building from source)
 - PipeWire or ALSA audio
 - An API key for a Whisper-compatible service (e.g. [Groq](https://console.groq.com))
 
 ## Quick Start
+
+### Fedora / GNOME
 
 See [INSTALL.md](INSTALL.md) for full installation instructions.
 
@@ -57,6 +64,30 @@ voice-transcriber-settings   # configure your API key
 gnome-extensions enable voice-transcriber@local
 # press Super+' to record
 ```
+
+### NixOS / Hyprland
+
+Full guide: [docs/hyprland.md](docs/hyprland.md). Short version:
+
+```nix
+# home.nix
+{ inputs, ... }: {
+  imports = [ inputs.voice-transcriber.homeManagerModules.default ];
+  programs.voice-transcriber = {
+    enable = true;
+    waylandDisplay = "wayland-1";
+  };
+}
+```
+
+```conf
+# ~/.config/hypr/hyprland.conf
+bind = SUPER, apostrophe, exec, dbus-send --session --type=method_call \
+    --dest=org.transcriber.Daemon /org/transcriber/Daemon \
+    org.transcriber.Daemon.StartRecording
+```
+
+`nix develop` gives a build shell; `nix build .#voice-transcriber` builds the binaries.
 
 ## Troubleshooting
 

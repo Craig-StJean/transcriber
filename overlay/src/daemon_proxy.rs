@@ -36,6 +36,12 @@ pub trait Daemon {
     #[zbus(signal)]
     async fn transcription_ready(&self, text: String) -> zbus::Result<()>;
 
+    /// Emitted during a streaming transcription. Each emission carries the
+    /// running cumulative transcript so far — clients track a "last text"
+    /// cursor and inject only the new suffix.
+    #[zbus(signal)]
+    async fn transcription_chunk(&self, text: String) -> zbus::Result<()>;
+
     /// The daemon's current state string (same values as StateChanged signal).
     /// Declared as a regular fn: zbus caches property values and exposes them
     /// synchronously in proxies generated with gen_blocking = false.
@@ -50,6 +56,7 @@ pub enum DaemonEvent {
     StateChanged(String),
     AudioLevel(f64),
     TranscriptionReady(String),
+    TranscriptionChunk(String),
 }
 
 // ── Connection helper ─────────────────────────────────────────────────────────
@@ -105,6 +112,17 @@ pub async fn connect(
         while let Some(signal) = text_stream.next().await {
             if let Ok(args) = signal.args() {
                 tx3.send(DaemonEvent::TranscriptionReady(args.text().to_owned())).await.ok();
+            }
+        }
+    });
+
+    // ── TranscriptionChunk stream (streaming providers only) ──────────────────
+    let tx4 = event_tx.clone();
+    let mut chunk_stream = proxy.receive_transcription_chunk().await?;
+    tokio::spawn(async move {
+        while let Some(signal) = chunk_stream.next().await {
+            if let Ok(args) = signal.args() {
+                tx4.send(DaemonEvent::TranscriptionChunk(args.text().to_owned())).await.ok();
             }
         }
     });
