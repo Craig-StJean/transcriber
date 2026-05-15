@@ -81,8 +81,13 @@ impl OverlayWindow {
         window.set_anchor(Edge::Right, false);
         window.set_anchor(Edge::Top, false);
         window.set_margin(Edge::Bottom, 140);
-        // Pass keyboard events only when the window is focused (Esc to cancel).
-        window.set_keyboard_mode(KeyboardMode::OnDemand);
+        // Never grab keyboard focus. Esc-to-cancel is wired at the
+        // compositor level (a Hyprland submap that activates only while
+        // recording — see home/hyprland.nix in the user's system-config).
+        // With KeyboardMode::OnDemand the overlay can briefly steal focus
+        // when its state changes, causing auto-pasted text to land in
+        // the overlay instead of the intended target window.
+        window.set_keyboard_mode(KeyboardMode::None);
 
         // ── Build VU meter bars ───────────────────────────────────────────────
         let bars_box = gtk4::Box::builder()
