@@ -199,7 +199,11 @@ impl TranscriberInterface {
                                 .sqrt();
                             let new_i16 = streaming::f32_to_i16(samples);
                             prev_len = guard.len();
-                            ((rms * 25.0).clamp(0.0, 1.0), new_i16)
+                            // VU mapping: subtract a ~-34dB noise floor
+                            // then scale. The previous (rms * 25.0) had
+                            // no floor and saturated on any room ambient.
+                            let scaled = ((rms - 0.02).max(0.0) * 10.0).clamp(0.0, 1.0);
+                            (scaled, new_i16)
                         }
                     };
 
@@ -329,7 +333,10 @@ impl TranscriberInterface {
                                 / samples.len() as f64)
                                 .sqrt();
                             prev_len = guard.len();
-                            (rms * 25.0).clamp(0.0, 1.0)
+                            // VU mapping: see comment in the streaming
+                            // branch above. Same formula here so both
+                            // capture paths render identically.
+                            ((rms - 0.02).max(0.0) * 10.0).clamp(0.0, 1.0)
                         }
                     };
 
