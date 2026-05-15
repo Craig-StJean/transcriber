@@ -34,6 +34,24 @@ pub struct AppConfig {
     pub language: Option<String>,
     /// Microphone sample rate in Hz (16000 recommended for Whisper).
     pub sample_rate: u32,
+    /// VU meter mapping: level = ((rms - floor) * gain).clamp(0, 1).
+    /// Defaults preserve the original hard-coded behaviour (no floor,
+    /// gain=25.0). Lower the gain or raise the floor on a noisy mic.
+    #[serde(default = "default_audio_level_gain")]
+    pub audio_level_gain: f64,
+    #[serde(default)]
+    pub audio_level_floor: f64,
+    /// wlr-layer-shell keyboard interactivity for the overlay window.
+    /// "ondemand" (default, original behaviour) — overlay can take
+    /// keyboard focus, which is required to receive Esc-to-cancel
+    /// when the cancel hotkey is not wired at the compositor level.
+    /// "none" — overlay never grabs focus; use when Esc-to-cancel
+    /// is wired in the compositor (e.g. a Hyprland submap) so
+    /// auto-paste keystrokes always reach the previously-focused
+    /// window. "exclusive" — overlay takes exclusive keyboard input
+    /// while shown (rarely useful).
+    #[serde(default = "default_overlay_keyboard_mode")]
+    pub overlay_keyboard_mode: String,
     /// Whether to save transcription history (WAV recordings + results) to disk.
     #[serde(default = "default_true")]
     pub save_history: bool,
@@ -98,6 +116,8 @@ pub struct AppConfig {
 
 fn default_provider()           -> String { "groq".into() }
 fn default_groq_model()         -> String { "whisper-large-v3-turbo".into() }
+fn default_audio_level_gain()   -> f64    { 25.0 }
+fn default_overlay_keyboard_mode() -> String { "ondemand".into() }
 fn default_cohere_model()       -> String { "cohere-transcribe-03-2026".into() }
 fn default_streaming_provider() -> String { "deepgram".into() }
 fn default_deepgram_model()     -> String { "nova-3".into() }
@@ -127,6 +147,9 @@ impl Default for AppConfig {
             custom_model:   String::new(),
             language:       Some("en".into()),
             sample_rate:    16000,
+            audio_level_gain:  default_audio_level_gain(),
+            audio_level_floor: 0.0,
+            overlay_keyboard_mode: default_overlay_keyboard_mode(),
             save_history:       true,
             vad_enabled:        false,
             direct_injection:   false,

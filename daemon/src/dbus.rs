@@ -171,6 +171,7 @@ impl TranscriberInterface {
             let stop_tx_vad     = self.stop_tx.clone();
             let audio_buf_vad   = self.audio_buf.clone();
             let state_watch     = self.state.clone();
+            let config_stream   = self.config.clone();
             let emitter_owned   = emitter.to_owned();
             tokio::spawn(async move {
                 let interval = Duration::from_millis(33);
@@ -199,10 +200,11 @@ impl TranscriberInterface {
                                 .sqrt();
                             let new_i16 = streaming::f32_to_i16(samples);
                             prev_len = guard.len();
-                            // VU mapping: subtract a ~-34dB noise floor
-                            // then scale. The previous (rms * 25.0) had
-                            // no floor and saturated on any room ambient.
-                            let scaled = ((rms - 0.02).max(0.0) * 10.0).clamp(0.0, 1.0);
+                            let (gain, floor) = {
+                                let cfg = config_stream.lock().unwrap();
+                                (cfg.audio_level_gain, cfg.audio_level_floor)
+                            };
+                            let scaled = ((rms - floor).max(0.0) * gain).clamp(0.0, 1.0);
                             (scaled, new_i16)
                         }
                     };
@@ -333,10 +335,11 @@ impl TranscriberInterface {
                                 / samples.len() as f64)
                                 .sqrt();
                             prev_len = guard.len();
-                            // VU mapping: see comment in the streaming
-                            // branch above. Same formula here so both
-                            // capture paths render identically.
-                            ((rms - 0.02).max(0.0) * 10.0).clamp(0.0, 1.0)
+                            let (gain, floor) = {
+                                let cfg = config_vad.lock().unwrap();
+                                (cfg.audio_level_gain, cfg.audio_level_floor)
+                            };
+                            ((rms - floor).max(0.0) * gain).clamp(0.0, 1.0)
                         }
                     };
 
