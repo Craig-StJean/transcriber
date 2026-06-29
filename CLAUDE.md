@@ -66,7 +66,7 @@ alsa-lib-devel gtk4-devel libadwaita-devel blueprint-compiler
 gtk4-layer-shell-devel   # only for overlay crate
 ```
 
-Rust 1.92+, GNOME Shell 45–50, libadwaita 1.9+, PipeWire or ALSA.
+Rust 1.91+, GNOME Shell 45–50, libadwaita 1.9+, PipeWire or ALSA.
 
 ## Service Management
 
