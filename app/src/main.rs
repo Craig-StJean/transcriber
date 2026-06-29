@@ -1140,6 +1140,11 @@ fn build_history_row(
         .subtitle(subtitle)
         .build();
 
+    // Unescaped text currently shown in the row. The toggle below flips it
+    // between the polished and original transcript; the copy button reads it so
+    // it copies whichever version the user is looking at.
+    let displayed: Rc<RefCell<String>> = Rc::new(RefCell::new(entry.text.clone()));
+
     if failed {
         let icon = gtk4::Image::builder()
             .icon_name("dialog-error-symbolic")
@@ -1152,6 +1157,8 @@ fn build_history_row(
             // polished text and the original (unpolished) transcript.
             let polished = glib::markup_escape_text(&entry.text).to_string();
             let original = glib::markup_escape_text(raw).to_string();
+            let polished_raw = entry.text.clone();
+            let original_raw = raw.to_string();
 
             let toggle = gtk4::ToggleButton::builder()
                 .icon_name("starred-symbolic")
@@ -1162,13 +1169,16 @@ fn build_history_row(
 
             toggle.connect_toggled({
                 let row = row.clone();
+                let displayed = Rc::clone(&displayed);
                 move |t| {
                     if t.is_active() {
                         row.set_title(&original);
+                        *displayed.borrow_mut() = original_raw.clone();
                         t.set_icon_name("non-starred-symbolic");
                         t.set_tooltip_text(Some("Show polished transcript"));
                     } else {
                         row.set_title(&polished);
+                        *displayed.borrow_mut() = polished_raw.clone();
                         t.set_icon_name("starred-symbolic");
                         t.set_tooltip_text(Some("Show original (unpolished) transcript"));
                     }
@@ -1187,11 +1197,11 @@ fn build_history_row(
             .tooltip_text("Copy to clipboard")
             .build();
         copy_btn.connect_clicked({
-            let text  = entry.text.clone();
+            let displayed = Rc::clone(&displayed);
             let toast = toast.clone();
             move |_| {
                 if let Some(display) = gtk4::gdk::Display::default() {
-                    display.clipboard().set_text(&text);
+                    display.clipboard().set_text(&displayed.borrow());
                 }
                 toast.add_toast(
                     adw::Toast::builder().title("Copied").timeout(2).build(),
