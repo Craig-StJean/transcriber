@@ -1063,12 +1063,6 @@ fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>)
     scrolled.set_child(Some(&list_box));
     stack.add_named(&scrolled, Some("list"));
 
-    let clamp = adw::Clamp::builder()
-        .maximum_size(600)
-        .child(&stack)
-        .vexpand(true)
-        .build();
-
     let refresh_slot: Rc<RefCell<Option<Rc<dyn Fn()>>>> = Rc::new(RefCell::new(None));
 
     // (timestamp_unix_secs, row, cached " · <duration>" suffix or "")
@@ -1116,7 +1110,7 @@ fn build_history_page(toast: &adw::ToastOverlay) -> (gtk4::Widget, Rc<dyn Fn()>)
         });
     }
 
-    (clamp.upcast(), refresh)
+    (stack.upcast(), refresh)
 }
 
 fn build_history_row(
@@ -1154,11 +1148,33 @@ fn build_history_row(
         row.add_prefix(&icon);
     } else if let Some(raw) = entry.text_original.as_deref() {
         if raw != entry.text {
-            let icon = gtk4::Image::builder()
+            // Polished entry: a toggle that swaps the visible title between the
+            // polished text and the original (unpolished) transcript.
+            let polished = glib::markup_escape_text(&entry.text).to_string();
+            let original = glib::markup_escape_text(raw).to_string();
+
+            let toggle = gtk4::ToggleButton::builder()
                 .icon_name("starred-symbolic")
-                .tooltip_text(format!("Polished. Original: {raw}"))
+                .valign(gtk4::Align::Center)
+                .css_classes(vec!["flat"])
+                .tooltip_text("Show original (unpolished) transcript")
                 .build();
-            row.add_prefix(&icon);
+
+            toggle.connect_toggled({
+                let row = row.clone();
+                move |t| {
+                    if t.is_active() {
+                        row.set_title(&original);
+                        t.set_icon_name("non-starred-symbolic");
+                        t.set_tooltip_text(Some("Show polished transcript"));
+                    } else {
+                        row.set_title(&polished);
+                        t.set_icon_name("starred-symbolic");
+                        t.set_tooltip_text(Some("Show original (unpolished) transcript"));
+                    }
+                }
+            });
+            row.add_prefix(&toggle);
         }
     }
 
@@ -1370,18 +1386,59 @@ struct StatusCheck {
     fix:      Option<FixAction>,
 }
 
-fn check_daemon_installed() -> bool {
-    dirs::home_dir()
-        .map(|h| h.join(".local/bin/voice-transcriber-daemon").exists())
+/// True if the session is GNOME Shell (where the hotkey/VU meter come from the
+/// GNOME extension). On Hyprland / Sway / KDE / other wlroots compositors this
+/// is false and the standalone overlay binary plays that role instead.
+fn is_gnome() -> bool {
+    std::env::var("XDG_CURRENT_DESKTOP")
+        .map(|d| d.to_ascii_lowercase().contains("gnome"))
         .unwrap_or(false)
 }
 
-fn check_daemon_running() -> bool {
+/// Whether `name` is installed, checking both the install.sh location
+/// (~/.local/bin) and anywhere on `$PATH`. The PATH check covers NixOS /
+/// home-manager, where binaries live in the read-only Nix store rather than
+/// ~/.local/bin.
+fn binary_available(name: &str, local_subpath: &str) -> bool {
+    if dirs::home_dir()
+        .map(|h| h.join(local_subpath).exists())
+        .unwrap_or(false)
+    {
+        return true;
+    }
+    std::env::var_os("PATH")
+        .map(|paths| std::env::split_paths(&paths).any(|p| p.join(name).exists()))
+        .unwrap_or(false)
+}
+
+fn service_active(service: &str) -> bool {
     std::process::Command::new("systemctl")
-        .args(["--user", "is-active", "--quiet", "voice-transcriber-daemon.service"])
+        .args(["--user", "is-active", "--quiet", service])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
+}
+
+fn check_daemon_installed() -> bool {
+    binary_available(
+        "voice-transcriber-daemon",
+        ".local/bin/voice-transcriber-daemon",
+    )
+}
+
+fn check_daemon_running() -> bool {
+    service_active("voice-transcriber-daemon.service")
+}
+
+fn check_overlay_installed() -> bool {
+    binary_available(
+        "voice-transcriber-overlay",
+        ".local/bin/voice-transcriber-overlay",
+    )
+}
+
+fn check_overlay_running() -> bool {
+    service_active("voice-transcriber-overlay.service")
 }
 
 fn check_extension_installed() -> bool {
@@ -1412,29 +1469,43 @@ fn check_api_key() -> bool {
         .unwrap_or(false)
 }
 
-const CHECKS: &[StatusCheck] = &[
-    StatusCheck {
-        title:    "Daemon installed",
-        ok_msg:   "Binary found at ~/.local/bin/voice-transcriber-daemon",
-        fail_msg: "Binary not found — run install.sh",
-        run:      check_daemon_installed,
-        fix:      Some(FixAction::CopyText {
-            btn_label: "Copy command",
-            text:      "bash install.sh",
-        }),
-    },
-    StatusCheck {
-        title:    "Daemon running",
-        ok_msg:   "systemd service is active",
-        fail_msg: "Service not running",
-        run:      check_daemon_running,
-        fix:      Some(FixAction::RunCommand {
-            btn_label: "Start daemon",
-            _cmd:      "systemctl --user enable --now voice-transcriber-daemon.service",
-            program:   "systemctl",
-            args:      &["--user", "enable", "--now", "voice-transcriber-daemon.service"],
-        }),
-    },
+const DAEMON_INSTALLED_CHECK: StatusCheck = StatusCheck {
+    title:    "Daemon installed",
+    ok_msg:   "Binary found in ~/.local/bin or on $PATH",
+    fail_msg: "Binary not found — run install.sh (or rebuild your Nix config)",
+    run:      check_daemon_installed,
+    fix:      Some(FixAction::CopyText {
+        btn_label: "Copy command",
+        text:      "bash install.sh",
+    }),
+};
+
+const DAEMON_RUNNING_CHECK: StatusCheck = StatusCheck {
+    title:    "Daemon running",
+    ok_msg:   "systemd service is active",
+    fail_msg: "Service not running",
+    run:      check_daemon_running,
+    fix:      Some(FixAction::RunCommand {
+        btn_label: "Start daemon",
+        _cmd:      "systemctl --user enable --now voice-transcriber-daemon.service",
+        program:   "systemctl",
+        args:      &["--user", "enable", "--now", "voice-transcriber-daemon.service"],
+    }),
+};
+
+const API_KEY_CHECK: StatusCheck = StatusCheck {
+    title:    "API key configured",
+    ok_msg:   "API key is set",
+    fail_msg: "No API key — transcription will fail",
+    run:      check_api_key,
+    fix:      Some(FixAction::GoToSettings),
+};
+
+/// Checks shown on GNOME Shell sessions: the hotkey + VU meter come from the
+/// GNOME extension.
+const GNOME_CHECKS: &[StatusCheck] = &[
+    DAEMON_INSTALLED_CHECK,
+    DAEMON_RUNNING_CHECK,
     StatusCheck {
         title:    "Extension installed",
         ok_msg:   "Found in ~/.local/share/gnome-shell/extensions/",
@@ -1467,14 +1538,46 @@ const CHECKS: &[StatusCheck] = &[
             args:      &["enable", "voice-transcriber@local"],
         }),
     },
-    StatusCheck {
-        title:    "API key configured",
-        ok_msg:   "API key is set",
-        fail_msg: "No API key — transcription will fail",
-        run:      check_api_key,
-        fix:      Some(FixAction::GoToSettings),
-    },
+    API_KEY_CHECK,
 ];
+
+/// Checks shown on wlroots compositors (Hyprland / Sway / KDE): the hotkey +
+/// VU meter come from the standalone overlay binary, not a GNOME extension.
+const WLROOTS_CHECKS: &[StatusCheck] = &[
+    DAEMON_INSTALLED_CHECK,
+    DAEMON_RUNNING_CHECK,
+    StatusCheck {
+        title:    "Overlay installed",
+        ok_msg:   "Binary found in ~/.local/bin or on $PATH",
+        fail_msg: "Overlay not found — run install.sh (or enable it in your Nix config)",
+        run:      check_overlay_installed,
+        fix:      Some(FixAction::CopyText {
+            btn_label: "Copy command",
+            text:      "bash install.sh",
+        }),
+    },
+    StatusCheck {
+        title:    "Overlay running",
+        ok_msg:   "systemd service is active",
+        fail_msg: "Overlay not running",
+        run:      check_overlay_running,
+        fix:      Some(FixAction::RunCommand {
+            btn_label: "Start overlay",
+            _cmd:      "systemctl --user enable --now voice-transcriber-overlay.service",
+            program:   "systemctl",
+            args:      &["--user", "enable", "--now", "voice-transcriber-overlay.service"],
+        }),
+    },
+    API_KEY_CHECK,
+];
+
+fn active_checks() -> &'static [StatusCheck] {
+    if is_gnome() {
+        GNOME_CHECKS
+    } else {
+        WLROOTS_CHECKS
+    }
+}
 
 fn apply_check_state(
     row:  &adw::ActionRow,
@@ -1510,7 +1613,7 @@ fn build_status_page(
 
     let mut refreshers: Vec<Box<dyn Fn()>> = Vec::new();
 
-    for check in CHECKS {
+    for check in active_checks() {
         let row = adw::ActionRow::builder().title(check.title).build();
 
         let icon = gtk4::Image::new();
