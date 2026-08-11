@@ -1,7 +1,7 @@
 [Desktop Entry]
-Name=Voice Transcriber Settings
+Name=Transcriber Settings
 Comment=Configure voice transcription and view history
-Exec=voice-transcriber-settings
+Exec=transcriber-settings
 Icon=audio-input-microphone
 Terminal=false
 Type=Application

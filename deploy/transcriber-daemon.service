@@ -1,6 +1,6 @@
 [Unit]
-Description=Voice Transcriber Daemon
-Documentation=https://github.com/local/voice-transcriber
+Description=Transcriber Daemon
+Documentation=https://github.com/Craig-StJean/transcriber
 After=graphical-session.target
 PartOf=graphical-session.target
 
@@ -8,7 +8,7 @@ PartOf=graphical-session.target
 Type=dbus
 BusName=org.transcriber.Daemon
 
-ExecStart=%h/.local/bin/voice-transcriber-daemon
+ExecStart=%h/.local/bin/transcriber-daemon
 Restart=on-failure
 RestartSec=3s
 

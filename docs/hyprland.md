@@ -1,6 +1,6 @@
-# Voice Transcriber on NixOS + Hyprland
+# Transcriber on NixOS + Hyprland
 
-This guide covers running voice-transcriber on NixOS under Hyprland. The
+This guide covers running transcriber on NixOS under Hyprland. The
 GNOME Shell extension does not apply; instead, the Wayland-native `overlay`
 binary provides the on-screen VU meter, and global hotkeys are bound directly
 in `hyprland.conf` via `dbus-send`.
@@ -14,7 +14,7 @@ Add the flake to your inputs and import the module:
 ```nix
 # flake.nix (your system config)
 {
-  inputs.voice-transcriber.url = "github:YOUR_USER/voice-transcriber";
+  inputs.transcriber.url = "github:YOUR_USER/transcriber";
   # …
 }
 ```
@@ -22,13 +22,13 @@ Add the flake to your inputs and import the module:
 ```nix
 # home.nix
 { inputs, ... }: {
-  imports = [ inputs.voice-transcriber.homeManagerModules.default ];
+  imports = [ inputs.transcriber.homeManagerModules.default ];
 
-  programs.voice-transcriber = {
+  programs.transcriber = {
     enable = true;
     waylandDisplay = "wayland-1";  # Hyprland default; check with `echo $WAYLAND_DISPLAY`
 
-    # Optional: declaratively manage ~/.config/voice-transcriber/config.json.
+    # Optional: declaratively manage ~/.config/transcriber/config.json.
     # Omit this and use the settings GUI instead if you'd rather edit in place.
     config = {
       provider = "groq";
@@ -45,7 +45,7 @@ Apply with `home-manager switch` (or `nh home switch`).
 ### Option B — Ad-hoc
 
 ```bash
-nix profile install github:YOUR_USER/voice-transcriber
+nix profile install github:YOUR_USER/transcriber
 ```
 
 Then write the systemd units and DBus activation file yourself (see
@@ -75,7 +75,7 @@ In your system configuration:
 ```
 
 If you are **not** using `uwsm` to launch Hyprland, set
-`programs.voice-transcriber.autostart = false;` in your home config and add
+`programs.transcriber.autostart = false;` in your home config and add
 `exec-once` lines to `hyprland.conf` instead (see step 4).
 
 ## 3. Bind the global hotkey
@@ -108,7 +108,7 @@ If you launch Hyprland without `uwsm`, `graphical-session.target` isn't
 reached and the systemd-managed overlay never starts. Add:
 
 ```conf
-exec-once = systemctl --user start voice-transcriber-overlay.service
+exec-once = systemctl --user start transcriber-overlay.service
 ```
 
 (The daemon starts on demand via DBus activation, so it doesn't need an
@@ -116,9 +116,9 @@ exec-once = systemctl --user start voice-transcriber-overlay.service
 
 ## 5. Configure your API key
 
-Open **Voice Transcriber Settings** from your launcher (or run
-`voice-transcriber-settings`) and paste a Groq / OpenAI / Deepgram API key.
-Skip this step if you set `programs.voice-transcriber.config` declaratively.
+Open **Transcriber Settings** from your launcher (or run
+`transcriber-settings`) and paste a Groq / OpenAI / Deepgram API key.
+Skip this step if you set `programs.transcriber.config` declaratively.
 
 ## 6. First recording
 
@@ -135,8 +135,8 @@ Skip this step if you set `programs.voice-transcriber.config` declaratively.
 **Daemon not responding to hotkey:**
 
 ```bash
-systemctl --user status voice-transcriber-daemon.service
-journalctl --user -u voice-transcriber-daemon.service -f
+systemctl --user status transcriber-daemon.service
+journalctl --user -u transcriber-daemon.service -f
 ```
 
 Test the DBus path manually:
@@ -151,7 +151,7 @@ dbus-send --session --print-reply --dest=org.transcriber.Daemon \
 - Confirm `WAYLAND_DISPLAY` is set in the service (`systemctl --user show-environment`).
 - Confirm `gtk4-layer-shell` is the runtime version Hyprland supports (it should be — Hyprland implements `wlr-layer-shell-unstable-v1`).
 - Look for "compositor does not support wlr-layer-shell" in the overlay's
-  log: `journalctl --user -u voice-transcriber-overlay.service`.
+  log: `journalctl --user -u transcriber-overlay.service`.
 
 **Clipboard empty after transcription:**
 

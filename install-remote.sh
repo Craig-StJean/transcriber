@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# One-command installer for Voice Transcriber.
+# One-command installer for Transcriber.
 # Downloads pre-built binaries from a GitHub Release and installs everything.
 #
 # Usage:
@@ -14,15 +14,15 @@
 set -euo pipefail
 
 REPO="Craig-StJean/transcriber"
-APP_NAME="voice-transcriber"
+APP_NAME="transcriber"
 
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/voice-transcriber@local"
-DATA_DIR="$HOME/.local/share/voice-transcriber"
-CONFIG_DIR="$HOME/.config/voice-transcriber"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
+DATA_DIR="$HOME/.local/share/transcriber"
+CONFIG_DIR="$HOME/.config/transcriber"
 
 bold="\033[1m"
 dim="\033[2m"
@@ -150,15 +150,15 @@ ok "downloaded"
 
 info "Extracting..."
 tar xzf "$TMPDIR/release.tar.gz" -C "$TMPDIR"
-RELEASE_DIR="$(find "$TMPDIR" -maxdepth 1 -type d -name 'voice-transcriber-*' | head -1)"
+RELEASE_DIR="$(find "$TMPDIR" -maxdepth 1 -type d -name 'transcriber-*' | head -1)"
 [[ -d "$RELEASE_DIR" ]] || err "Unexpected tarball structure"
 ok "extracted"
 
 # ── Stop daemon if upgrading ─────────────────────────────────────────────────
 
-if systemctl --user is-active --quiet voice-transcriber-daemon.service 2>/dev/null; then
+if systemctl --user is-active --quiet transcriber-daemon.service 2>/dev/null; then
     info "Stopping daemon for upgrade..."
-    systemctl --user stop voice-transcriber-daemon.service
+    systemctl --user stop transcriber-daemon.service
     ok "daemon stopped"
 fi
 
@@ -166,16 +166,16 @@ fi
 
 info "Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-daemon"   "$BIN_DIR/"
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-settings"  "$BIN_DIR/"
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-overlay"   "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-daemon"   "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-settings"  "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-overlay"   "$BIN_DIR/"
 ok ""
 
 info "Installing systemd services..."
 mkdir -p "$SYSTEMD_DIR"
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-daemon.service" "$SYSTEMD_DIR/"
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-update.service" "$SYSTEMD_DIR/"
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-update.timer"   "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-daemon.service" "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-update.service" "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-update.timer"   "$SYSTEMD_DIR/"
 ok ""
 
 info "Installing DBus activation file..."
@@ -210,24 +210,24 @@ echo "$INSTALL_VERSION" > "$DATA_DIR/version"
 
 info "Enabling services..."
 systemctl --user daemon-reload
-systemctl --user enable --now voice-transcriber-daemon.service
-systemctl --user enable --now voice-transcriber-update.timer
+systemctl --user enable --now transcriber-daemon.service
+systemctl --user enable --now transcriber-update.timer
 ok ""
 
 # ── Done ─────────────────────────────────────────────────────────────────────
 
 echo ""
-echo -e "${green}${bold}Voice Transcriber $TAG_NAME installed successfully!${reset}"
+echo -e "${green}${bold}Transcriber $TAG_NAME installed successfully!${reset}"
 echo ""
 echo "Next steps:"
-echo "  1. Open 'Voice Transcriber Settings' from the app launcher, or run: voice-transcriber-settings"
+echo "  1. Open 'Transcriber Settings' from the app launcher, or run: transcriber-settings"
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     echo "  2. Log out and back in so GNOME Shell picks up the extension."
-    echo "     Then enable it:  gnome-extensions enable voice-transcriber@local"
+    echo "     Then enable it:  gnome-extensions enable transcriber@local"
     echo "     (Wayland can't reload the shell in place — logout is required.)"
 else
     echo "  2. Restart GNOME Shell with Alt+F2 → 'r', then enable the extension:"
-    echo "       gnome-extensions enable voice-transcriber@local"
+    echo "       gnome-extensions enable transcriber@local"
 fi
 echo "  3. Press Super+' (Super + apostrophe) to start recording."
 echo ""

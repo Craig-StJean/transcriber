@@ -1,15 +1,15 @@
 [Unit]
-Description=Voice Transcriber Overlay (wlroots/KDE)
-Documentation=https://github.com/local/voice-transcriber
+Description=Transcriber Overlay (wlroots/KDE)
+Documentation=https://github.com/Craig-StJean/transcriber
 After=graphical-session.target
 # Start together with the daemon; both can run independently but this is the
 # typical pairing on non-GNOME Wayland sessions.
-After=voice-transcriber-daemon.service
+After=transcriber-daemon.service
 PartOf=graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/bin/voice-transcriber-overlay
+ExecStart=%h/.local/bin/transcriber-overlay
 Restart=on-failure
 RestartSec=3s
 

@@ -1,12 +1,25 @@
 {
-  description = "Voice Transcriber — native Linux voice-to-text with global hotkey (Hyprland / wlroots / KDE)";
+  description = "Transcriber — native Linux voice-to-text with global hotkey (Hyprland / wlroots / KDE)";
 
   inputs = {
-    # staging-next instead of nixos-unstable because the settings app pins
-    # `libadwaita-rs` v1_9 features (see app/Cargo.toml), and libadwaita 1.9.0
-    # is only present on staging-next as of mid-2026. Once it lands in
-    # nixos-unstable this can be moved back.
-    nixpkgs.url = "github:NixOS/nixpkgs/staging-next";
+    # This used to pin `staging-next`, because the settings app needs
+    # `libadwaita-rs` v1_9 features (see app/Cargo.toml) and libadwaita 1.9.0
+    # had not reached a release channel yet. That is over: 1.9.2 shipped in
+    # nixos-26.05 (and nixos-unstable), so the pin came off on 2026-08-10.
+    #
+    # Do not put it back. staging-next is a mass-rebuild integration branch —
+    # it is routinely mid-rebuild, uncached, and can fail to evaluate outright,
+    # which is a poor thing to hand anyone consuming this flake. It also forced
+    # every consumer to carry a second, parallel nixpkgs closure, because a
+    # `follows` onto a release channel could not satisfy the libadwaita
+    # requirement.
+    #
+    # A release channel rather than nixos-unstable so a standalone `nix build`
+    # of this repo is reproducible-ish and cache-warm. Consumers that set
+    # `inputs.nixpkgs.follows` (as system-config does) override this anyway, so
+    # it only governs direct `nix build` / `nix run` of this flake. Bump it when
+    # moving to a newer NixOS release.
+    nixpkgs.url = "github:NixOS/nixpkgs/nixos-26.05";
     flake-utils.url = "github:numtide/flake-utils";
     rust-overlay = {
       url = "github:oxalica/rust-overlay";
@@ -66,8 +79,8 @@
           libxkbcommon
         ];
 
-        voice-transcriber = rustPlatform.buildRustPackage {
-          pname = "voice-transcriber";
+        transcriber = rustPlatform.buildRustPackage {
+          pname = "transcriber";
           version = "0.1.0";
 
           src = ./.;
@@ -77,13 +90,19 @@
 
           # Build only our three workspace binaries; skip dependency dev-targets.
           cargoBuildFlags = [
-            "-p" "voice-transcriber-daemon"
-            "-p" "voice-transcriber-overlay"
-            "-p" "voice-transcriber-settings"
+            "-p" "transcriber-daemon"
+            "-p" "transcriber-overlay"
+            "-p" "transcriber-settings"
           ];
 
-          # The workspace has no unit tests at the moment.
-          doCheck = false;
+          # Run the `common` crate's unit tests as part of the build. Scoped to
+          # that one package on purpose: it is the only crate with tests, and
+          # building the daemon/overlay/settings test harnesses would pull in
+          # their dev-dependencies for nothing. The tests are pure logic (config
+          # parsing, prompt budgeting) with no filesystem or network access, so
+          # they run fine in the Nix sandbox.
+          doCheck = true;
+          cargoTestFlags = [ "-p" "transcriber-common" ];
 
           # wrapGAppsHook4 will wrap every binary in $out/bin. The daemon doesn't
           # need GTK env, but wrapping is harmless for it. We just need the GTK
@@ -91,15 +110,16 @@
 
           meta = with pkgs.lib; {
             description = "Native Linux voice-to-text tool with global hotkey";
-            homepage = "https://github.com/local/voice-transcriber";
+            homepage = "https://github.com/Craig-StJean/transcriber";
+            license = licenses.mit;
             platforms = platforms.linux;
-            mainProgram = "voice-transcriber-settings";
+            mainProgram = "transcriber-settings";
           };
         };
       in {
         packages = {
-          default = voice-transcriber;
-          voice-transcriber = voice-transcriber;
+          default = transcriber;
+          transcriber = transcriber;
         };
 
         # `nix develop` — full build environment for `cargo build` locally.
@@ -114,14 +134,14 @@
         # `nix run` defaults to opening the settings GUI.
         apps.default = {
           type = "app";
-          program = "${voice-transcriber}/bin/voice-transcriber-settings";
+          program = "${transcriber}/bin/transcriber-settings";
         };
       }
     ) // {
       # System-agnostic outputs. The HM module is curried with `self` so it can
-      # default `programs.voice-transcriber.package` to this flake's build of
+      # default `programs.transcriber.package` to this flake's build of
       # the workspace.
       homeManagerModules.default = import ./nix/hm-module.nix self;
-      homeManagerModules.voice-transcriber = import ./nix/hm-module.nix self;
+      homeManagerModules.transcriber = import ./nix/hm-module.nix self;
     };
 }

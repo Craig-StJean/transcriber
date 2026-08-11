@@ -45,14 +45,14 @@ automatically in response to a D-Bus method call. This provides several benefits
 GSettings is the standard mechanism for storing and retrieving user preferences on GNOME.
 
 - **Schema ID**: Use reverse domain notation that matches or extends your application ID
-  (for example, `org.gnome.shell.extensions.voice-transcriber`).
+  (for example, `org.gnome.shell.extensions.transcriber`).
 - **Define schemas in XML** with proper types, defaults, summaries, and descriptions for every
   key. This enables tools such as `dconf-editor` to display helpful information.
 
   ```xml
   <schemalist>
-    <schema id="org.gnome.shell.extensions.voice-transcriber"
-            path="/org/gnome/shell/extensions/voice-transcriber/">
+    <schema id="org.gnome.shell.extensions.transcriber"
+            path="/org/gnome/shell/extensions/transcriber/">
       <key name="api-key" type="s">
         <default>''</default>
         <summary>API Key</summary>
@@ -139,11 +139,11 @@ Example unit file:
 
 ```ini
 [Unit]
-Description=Voice Transcriber Background Service
+Description=Transcriber Background Service
 
 [Service]
 Type=dbus
-BusName=org.gnome.shell.extensions.voice-transcriber
+BusName=org.gnome.shell.extensions.transcriber
 ExecStart=/usr/bin/transcriber-daemon
 
 [Install]

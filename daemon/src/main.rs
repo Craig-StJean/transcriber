@@ -11,7 +11,7 @@ use std::sync::{Arc, Mutex};
 #[tokio::main]
 async fn main() -> Result<()> {
     if std::env::args().any(|a| a == "--version" || a == "-V") {
-        println!("voice-transcriber-daemon {}", env!("CARGO_PKG_VERSION"));
+        println!("transcriber-daemon {}", env!("CARGO_PKG_VERSION"));
         return Ok(());
     }
 
@@ -22,7 +22,7 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    tracing::info!("voice-transcriber-daemon starting");
+    tracing::info!("transcriber-daemon starting");
 
     let cfg = common::config::load()?;
     tracing::info!("config loaded from {}", common::config::config_path().display());

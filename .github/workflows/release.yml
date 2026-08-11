@@ -33,19 +33,19 @@ jobs:
         run: |
           source "$HOME/.cargo/env"
           cargo build --release \
-            -p voice-transcriber-daemon \
-            -p voice-transcriber-settings \
-            -p voice-transcriber-overlay
+            -p transcriber-daemon \
+            -p transcriber-settings \
+            -p transcriber-overlay
 
       - name: Package release tarball
         run: |
           VERSION="${GITHUB_REF_NAME#v}"
-          STAGING="voice-transcriber-${VERSION}"
+          STAGING="transcriber-${VERSION}"
           mkdir -p "${STAGING}/bin" "${STAGING}/deploy" "${STAGING}/extension" "${STAGING}/scripts"
 
-          cp target/release/voice-transcriber-daemon   "${STAGING}/bin/"
-          cp target/release/voice-transcriber-settings  "${STAGING}/bin/"
-          cp target/release/voice-transcriber-overlay   "${STAGING}/bin/"
+          cp target/release/transcriber-daemon   "${STAGING}/bin/"
+          cp target/release/transcriber-settings  "${STAGING}/bin/"
+          cp target/release/transcriber-overlay   "${STAGING}/bin/"
 
           cp deploy/*.service deploy/*.desktop          "${STAGING}/deploy/"
           cp deploy/*.timer                             "${STAGING}/deploy/" 2>/dev/null || true
@@ -55,8 +55,8 @@ jobs:
 
           echo "${VERSION}" > "${STAGING}/VERSION"
 
-          tar czf "voice-transcriber-${VERSION}.tar.gz" "${STAGING}"
-          echo "TARBALL=voice-transcriber-${VERSION}.tar.gz" >> "$GITHUB_ENV"
+          tar czf "transcriber-${VERSION}.tar.gz" "${STAGING}"
+          echo "TARBALL=transcriber-${VERSION}.tar.gz" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2

@@ -1,0 +1,56 @@
+name: Nix build & cache
+
+# Builds the flake and pushes every resulting store path to a Cachix binary
+# cache, so consumers (system-config, the colleague's config) install a download
+# instead of compiling the Rust + GTK4 stack themselves.
+#
+# One-time setup, both outside this file:
+#   1. Create the cache at https://app.cachix.org (name below must match).
+#   2. Generate a write token: `cachix authtoken --validity 1y`, then add it as
+#      the repo secret CACHIX_AUTH_TOKEN
+#      (Settings → Secrets and variables → Actions).
+#
+# Consumers then add the cache as a substituter — see README.md.
+
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  # A newer push supersedes an in-flight build of the same ref. Tags are never
+  # cancelled: a release build finishing is worth more than the seconds saved.
+  group: nix-${{ github.ref }}
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: cachix/install-nix-action@v31
+        with:
+          extra_nix_config: |
+            experimental-features = nix-command flakes
+
+      - uses: cachix/cachix-action@v17
+        with:
+          name: craig-transcriber
+          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
+          # Pull requests from forks cannot read repo secrets, so pushing would
+          # fail the job. Build and verify there, publish only from this repo.
+          skipPush: ${{ github.event_name == 'pull_request' }}
+
+      # Builds the package and, because doCheck is on, runs the `common` crate's
+      # unit tests as part of it. cachix-action pushes whatever lands in the
+      # store when the job finishes.
+      - name: Build package
+        run: nix build .#default --print-build-logs
+
+      # The dev shell is what `nix develop` drops you into locally; caching its
+      # closure too means a fresh checkout doesn't rebuild the Rust toolchain.
+      - name: Build dev shell
+        run: nix build .#devShells.x86_64-linux.default --print-build-logs --no-link

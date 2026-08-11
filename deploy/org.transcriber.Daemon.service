@@ -1,4 +1,4 @@
 [D-BUS Service]
 Name=org.transcriber.Daemon
 Exec=/bin/false
-SystemdService=voice-transcriber-daemon.service
+SystemdService=transcriber-daemon.service

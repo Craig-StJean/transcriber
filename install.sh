@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Install voice-transcriber daemon + GNOME extension for the current user.
+# Install transcriber daemon + GNOME extension for the current user.
 # Run from the repository root.
 set -euo pipefail
 
@@ -8,26 +8,26 @@ BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/voice-transcriber@local"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
 
 echo "==> Building binaries (release)..."
 cargo build --release \
-    -p voice-transcriber-daemon \
-    -p voice-transcriber-settings \
+    -p transcriber-daemon \
+    -p transcriber-settings \
     --manifest-path "$REPO/Cargo.toml"
 
 echo "==> Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-install -m755 "$REPO/target/release/voice-transcriber-daemon"  "$BIN_DIR/"
-install -m755 "$REPO/target/release/voice-transcriber-settings" "$BIN_DIR/"
+install -m755 "$REPO/target/release/transcriber-daemon"  "$BIN_DIR/"
+install -m755 "$REPO/target/release/transcriber-settings" "$BIN_DIR/"
 
-DATA_DIR="$HOME/.local/share/voice-transcriber"
+DATA_DIR="$HOME/.local/share/transcriber"
 
 echo "==> Installing systemd user service..."
 mkdir -p "$SYSTEMD_DIR"
-install -m644 "$REPO/deploy/voice-transcriber-daemon.service" "$SYSTEMD_DIR/"
-install -m644 "$REPO/deploy/voice-transcriber-update.service" "$SYSTEMD_DIR/"
-install -m644 "$REPO/deploy/voice-transcriber-update.timer"   "$SYSTEMD_DIR/"
+install -m644 "$REPO/deploy/transcriber-daemon.service" "$SYSTEMD_DIR/"
+install -m644 "$REPO/deploy/transcriber-update.service" "$SYSTEMD_DIR/"
+install -m644 "$REPO/deploy/transcriber-update.timer"   "$SYSTEMD_DIR/"
 
 echo "==> Installing DBus activation file..."
 mkdir -p "$DBUS_SERVICES_DIR"
@@ -56,19 +56,19 @@ echo "$VERSION" > "$DATA_DIR/version"
 
 echo "==> Reloading systemd and enabling services..."
 systemctl --user daemon-reload
-systemctl --user enable --now voice-transcriber-daemon.service
-systemctl --user enable --now voice-transcriber-update.timer
+systemctl --user enable --now transcriber-daemon.service
+systemctl --user enable --now transcriber-update.timer
 
 echo ""
 echo "Done!  Next steps:"
-echo "  1. Open 'Voice Transcriber Settings' from the app launcher, or run: voice-transcriber-settings"
+echo "  1. Open 'Transcriber Settings' from the app launcher, or run: transcriber-settings"
 if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     echo "  2. Log out and back in so GNOME Shell picks up the extension."
-    echo "     Then enable it:  gnome-extensions enable voice-transcriber@local"
+    echo "     Then enable it:  gnome-extensions enable transcriber@local"
     echo "     (Wayland can't reload the shell in place — logout is required.)"
 else
     echo "  2. Restart GNOME Shell with Alt+F2 → 'r', then enable the extension:"
-    echo "       gnome-extensions enable voice-transcriber@local"
+    echo "       gnome-extensions enable transcriber@local"
 fi
 echo "  3. Press Super+' (Super + apostrophe) to start recording."
-echo "     (Rebind in: Voice Transcriber Settings, or GNOME Settings → Keyboard → Custom Shortcuts)"
+echo "     (Rebind in: Transcriber Settings, or GNOME Settings → Keyboard → Custom Shortcuts)"

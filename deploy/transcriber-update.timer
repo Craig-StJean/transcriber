@@ -1,5 +1,5 @@
 [Unit]
-Description=Voice Transcriber update check
+Description=Transcriber update check
 
 [Timer]
 OnCalendar=daily

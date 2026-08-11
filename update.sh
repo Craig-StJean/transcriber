@@ -16,9 +16,9 @@ step() { echo -e "\n${cyan}${bold}::${reset}${bold} $1${reset}"; }
 ok()   { echo -e "   ${green}done${reset} ${dim}$1${reset}"; }
 skip() { echo -e "   ${yellow}skip${reset} ${dim}$1${reset}"; }
 
-DATA_DIR="$HOME/.local/share/voice-transcriber"
+DATA_DIR="$HOME/.local/share/transcriber"
 
-echo -e "${bold}Voice Transcriber${reset} ${dim}update${reset}"
+echo -e "${bold}Transcriber${reset} ${dim}update${reset}"
 
 # ── Pull latest ──────────────────────────────────────────────────────────────
 
@@ -33,15 +33,15 @@ fi
 
 step "Building release binaries..."
 cargo build --release \
-    -p voice-transcriber-daemon \
-    -p voice-transcriber-settings \
+    -p transcriber-daemon \
+    -p transcriber-settings \
     --manifest-path "$REPO/Cargo.toml" 2>&1 | tail -1
 ok "compiled"
 
 # ── Daemon ───────────────────────────────────────────────────────────────────
 
-DAEMON_SRC="$REPO/target/release/voice-transcriber-daemon"
-DAEMON_DST="$BIN_DIR/voice-transcriber-daemon"
+DAEMON_SRC="$REPO/target/release/transcriber-daemon"
+DAEMON_DST="$BIN_DIR/transcriber-daemon"
 
 step "Updating daemon..."
 if [ -f "$DAEMON_DST" ] && cmp -s "$DAEMON_SRC" "$DAEMON_DST"; then
@@ -50,14 +50,14 @@ else
     install -m755 "$DAEMON_SRC" "$DAEMON_DST"
     ok "binary installed"
     systemctl --user daemon-reload
-    systemctl --user restart voice-transcriber-daemon.service
+    systemctl --user restart transcriber-daemon.service
     ok "daemon restarted"
 fi
 
 # ── Settings app ─────────────────────────────────────────────────────────────
 
-APP_SRC="$REPO/target/release/voice-transcriber-settings"
-APP_DST="$BIN_DIR/voice-transcriber-settings"
+APP_SRC="$REPO/target/release/transcriber-settings"
+APP_DST="$BIN_DIR/transcriber-settings"
 
 step "Updating settings app..."
 if [ -f "$APP_DST" ] && cmp -s "$APP_SRC" "$APP_DST"; then
@@ -73,7 +73,7 @@ fi
 
 # ── GNOME extension ─────────────────────────────────────────────────────────
 
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/voice-transcriber@local"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
 
 step "Updating GNOME extension..."
 if [ -d "$EXT_DIR" ]; then
