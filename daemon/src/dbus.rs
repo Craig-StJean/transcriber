@@ -501,7 +501,7 @@ impl TranscriberInterface {
             .map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
     }
 
-    /// Reload the in-memory config from `~/.config/voice-transcriber/config.json`.
+    /// Reload the in-memory config from `~/.config/transcriber/config.json`.
     /// Called by the settings app after the user changes a setting so the next
     /// recording uses the new values without requiring a daemon restart.
     /// A reload during an active recording does not affect that pipeline — the
@@ -555,13 +555,10 @@ impl TranscriberInterface {
 
 // ── Private helpers ───────────────────────────────────────────────────────────
 
-/// Save WAV bytes to `~/.local/share/voice-transcriber/recordings/<millis>.wav`.
+/// Save WAV bytes to `~/.local/share/transcriber/recordings/<millis>.wav`.
 /// Returns the absolute path on success.
 fn save_wav_to_disk(wav: &[u8]) -> Result<std::path::PathBuf> {
-    let dir = dirs::data_local_dir()
-        .expect("no data dir")
-        .join("voice-transcriber")
-        .join("recordings");
+    let dir = common::config::data_dir().join("recordings");
     std::fs::create_dir_all(&dir)?;
 
     let ms = std::time::SystemTime::now()
@@ -605,6 +602,7 @@ async fn transcribe_with_retry(
             cfg.active_key(),
             cfg.active_model(),
             cfg.active_language(),
+            cfg.active_prompt().as_deref(),
             wav.clone(),
         )
         .await

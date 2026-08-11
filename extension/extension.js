@@ -10,7 +10,7 @@ import { Extension } from 'resource:///org/gnome/shell/extensions/extension.js';
 import { createDaemonProxy } from './dbus.js';
 import { RecordingOverlay } from './overlay.js';
 
-export default class VoiceTranscriberExtension extends Extension {
+export default class TranscriberExtension extends Extension {
 
     enable() {
         this._settings      = this.getSettings();
@@ -64,14 +64,14 @@ export default class VoiceTranscriberExtension extends Extension {
             // immediately on first press even before a StateChanged signal fires.
             this._daemonState = proxy.CurrentState ?? 'Idle';
             this._connectSignals();
-            console.log('VoiceTranscriber: connected to daemon');
+            console.log('Transcriber: connected to daemon');
         }).catch(e => {
-            console.error('VoiceTranscriber: failed to create proxy:', e.message);
+            console.error('Transcriber: failed to create proxy:', e.message);
         });
     }
 
     _onDaemonGone() {
-        console.log('VoiceTranscriber: daemon disappeared');
+        console.log('Transcriber: daemon disappeared');
         this._disconnectSignals();
         this._proxy = null;
         this._daemonState = 'Idle';
@@ -101,7 +101,7 @@ export default class VoiceTranscriberExtension extends Extension {
             bus.signal_subscribe(null, iface, 'TranscriptionReady', path, null, flags,
                 (_c, _s, _p, _i, _n, params) => {
                     const text = params.get_child_value(0).get_string()[0];
-                    console.log(`VoiceTranscriber: TranscriptionReady (${text.length} chars)`);
+                    console.log(`Transcriber: TranscriptionReady (${text.length} chars)`);
                     try {
                         if (this._lastChunkText) {
                             // Streaming mode: type any remaining delta vs what was already typed
@@ -116,7 +116,7 @@ export default class VoiceTranscriberExtension extends Extension {
                                 this._autoPaste();
                         }
                     } catch (e) {
-                        console.error('VoiceTranscriber: TranscriptionReady handler failed:', e.message);
+                        console.error('Transcriber: TranscriptionReady handler failed:', e.message);
                     }
                 }),
             bus.signal_subscribe(null, iface, 'TranscriptionChunk', path, null, flags,
@@ -125,7 +125,7 @@ export default class VoiceTranscriberExtension extends Extension {
                     try {
                         this._onTranscriptionChunk(text);
                     } catch (e) {
-                        console.error('VoiceTranscriber: TranscriptionChunk handler failed:', e.message);
+                        console.error('Transcriber: TranscriptionChunk handler failed:', e.message);
                     }
                 }),
         );
@@ -196,17 +196,17 @@ export default class VoiceTranscriberExtension extends Extension {
 
     _toggleRecording() {
         if (!this._proxy) {
-            Main.notify('Voice Transcriber', 'Daemon is not running');
+            Main.notify('Transcriber', 'Daemon is not running');
             return;
         }
         const state = this._daemonState;
         if (!state || state === 'Idle' || state === 'Done' || state === 'Error') {
             this._proxy.StartRecordingRemote((_, err) => {
-                if (err) console.error('VoiceTranscriber: StartRecording failed:', err.message);
+                if (err) console.error('Transcriber: StartRecording failed:', err.message);
             });
         } else if (state === 'Recording') {
             this._proxy.StopRecordingRemote((_, err) => {
-                if (err) console.error('VoiceTranscriber: StopRecording failed:', err.message);
+                if (err) console.error('Transcriber: StopRecording failed:', err.message);
             });
         }
     }
@@ -248,7 +248,7 @@ export default class VoiceTranscriberExtension extends Extension {
             if (isTerminal) vk.notify_keyval(t++, Clutter.KEY_Shift_L, RELEASE);
             vk.notify_keyval(t++, Clutter.KEY_Control_L, RELEASE);
         } catch (e) {
-            console.error('VoiceTranscriber: auto-paste failed:', e.message);
+            console.error('Transcriber: auto-paste failed:', e.message);
         }
     }
 
@@ -268,14 +268,14 @@ export default class VoiceTranscriberExtension extends Extension {
                 vk.notify_keyval(t++, ks, RELEASE);
             }
         } catch (e) {
-            console.error('VoiceTranscriber: direct inject failed:', e.message);
+            console.error('Transcriber: direct inject failed:', e.message);
         }
     }
 
     _cancelRecording() {
         if (!this._proxy) return;
         this._proxy.CancelRemote((_, err) => {
-            if (err) console.error('VoiceTranscriber: Cancel failed:', err.message);
+            if (err) console.error('Transcriber: Cancel failed:', err.message);
         });
     }
 

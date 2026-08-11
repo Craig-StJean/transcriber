@@ -65,6 +65,20 @@ pub struct AppConfig {
     #[serde(default)]
     pub audio_cues_enabled: bool,
 
+    // ── Vocabulary hints ──────────────────────────────────────────────────────
+    /// Domain-specific terms — product names, proper nouns, jargon — sent with
+    /// each transcription request as a spelling hint. Whisper exposes this as
+    /// its `prompt` parameter: the text is treated as though it were the
+    /// transcript immediately preceding this audio, which biases the decoder
+    /// toward those spellings. It is a *hint*, not a constraint; the model can
+    /// still produce something else.
+    #[serde(default = "default_vocabulary")]
+    pub vocabulary: Vec<String>,
+    /// Whether to send `vocabulary` with each request. Off means the `prompt`
+    /// parameter is omitted entirely rather than sent empty.
+    #[serde(default = "default_true")]
+    pub vocabulary_enabled: bool,
+
     // ── Real-time streaming ───────────────────────────────────────────────────
     /// Stream audio over WebSocket for real-time transcription (~300 ms latency).
     /// Requires direct_injection to be enabled. Groq/Cohere do not support streaming.
@@ -123,6 +137,38 @@ fn default_streaming_provider() -> String { "deepgram".into() }
 fn default_deepgram_model()     -> String { "nova-3".into() }
 fn default_true()               -> bool   { true }
 
+/// Seeded with the two project names that Whisper reliably mangles otherwise
+/// ("AccuDose" → "accu dose"/"Accudos", "Safehous" → "Safehouse"). Anything
+/// else is user-added.
+pub const DEFAULT_VOCABULARY: &[&str] = &["AccuDose", "Safehous"];
+
+fn default_vocabulary() -> Vec<String> {
+    DEFAULT_VOCABULARY.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// Whisper truncates its `prompt` parameter at 224 tokens and gives no error
+/// when it does — it silently drops the tail, so the last terms in a long list
+/// would stop having any effect with nothing to indicate why.
+pub const VOCABULARY_TOKEN_LIMIT: usize = 224;
+
+/// Rough token count for a vocabulary list rendered as a Whisper prompt.
+///
+/// Deliberately pessimistic: Whisper's BPE vocabulary isn't shipped here, and
+/// the usual "~4 characters per token" rule of thumb is calibrated on ordinary
+/// prose. This field holds the opposite of that — product names, invented
+/// spellings and jargon, which are exactly the strings a BPE tokenizer splits
+/// into many short pieces ("AccuDose" is 3 tokens, not 2). Counting 3 chars per
+/// token plus one for the ", " separator keeps the estimate above the real
+/// figure, so the GUI warns early rather than letting a prompt be truncated.
+pub fn estimate_prompt_tokens(terms: &[String]) -> usize {
+    terms
+        .iter()
+        .map(|t| t.trim())
+        .filter(|t| !t.is_empty())
+        .map(|t| t.chars().count().div_ceil(3) + 1)
+        .sum()
+}
+
 fn default_postprocess_provider()     -> String { "groq".into() }
 fn default_postprocess_groq_model()   -> String { "llama-3.3-70b-versatile".into() }
 fn default_postprocess_gemini_model() -> String { "gemini-3-flash-preview".into() }
@@ -162,6 +208,8 @@ impl Default for AppConfig {
             vad_enabled:        false,
             direct_injection:   false,
             audio_cues_enabled: false,
+            vocabulary:         default_vocabulary(),
+            vocabulary_enabled: true,
             streaming_enabled:    false,
             streaming_provider:   default_streaming_provider(),
             deepgram_api_key:     String::new(),
@@ -206,6 +254,50 @@ impl AppConfig {
             "groq"   => &self.groq_model,
             "cohere" => &self.cohere_model,
             _        => &self.custom_model,
+        }
+    }
+
+    /// Vocabulary hint for the active provider, rendered as a Whisper `prompt`.
+    ///
+    /// Returns `None` when there is nothing to send, so the caller omits the
+    /// parameter rather than posting an empty one.
+    ///
+    /// Cohere is excluded on purpose: its `/v2/audio/transcriptions` endpoint is
+    /// only OpenAI-*shaped*, and does not document a `prompt` field. Sending an
+    /// unrecognised multipart field there risks a 400 on every request, which
+    /// would turn a cosmetic feature into a total transcription outage. Custom
+    /// endpoints are included — they are OpenAI-compatible by definition, which
+    /// covers a local whisper.cpp or faster-whisper server.
+    ///
+    /// The terms are joined into a bare comma-separated list rather than a
+    /// sentence like "The following words may appear: …". Whisper conditions on
+    /// this text as if it were the transcript preceding the audio, so
+    /// instructions in it are not followed — they just leak into the output as
+    /// transcribed words. A list of proper nouns is the shape that actually
+    /// biases the decoder.
+    pub fn active_prompt(&self) -> Option<String> {
+        if !self.vocabulary_enabled || self.provider == "cohere" {
+            return None;
+        }
+
+        // Take terms until the estimate would exceed Whisper's cap, so the
+        // dropped terms are the ones at the end of the user's list rather than
+        // an arbitrary mid-word cut by the API.
+        let mut kept: Vec<&str> = Vec::new();
+        let mut tokens = 0usize;
+        for term in self.vocabulary.iter().map(|t| t.trim()).filter(|t| !t.is_empty()) {
+            let cost = term.chars().count().div_ceil(3) + 1;
+            if tokens + cost > VOCABULARY_TOKEN_LIMIT {
+                break;
+            }
+            tokens += cost;
+            kept.push(term);
+        }
+
+        if kept.is_empty() {
+            None
+        } else {
+            Some(kept.join(", "))
         }
     }
 
@@ -256,11 +348,51 @@ impl AppConfig {
     }
 }
 
+/// Directory name under `~/.config` and `~/.local/share`.
+const DIR_NAME: &str = "transcriber";
+
+/// What that directory was called before the 2026-08-10 rename. Everything was
+/// `voice-transcriber`; the project is just "transcriber" now.
+const LEGACY_DIR_NAME: &str = "voice-transcriber";
+
+/// Rename `<base>/voice-transcriber` to `<base>/transcriber`, once.
+///
+/// Only acts when the legacy directory exists and the new one does not, so it
+/// is a no-op on every run after the first and can never clobber current state.
+/// Failures are ignored on purpose: the caller proceeds with the new path and
+/// starts fresh, which is strictly better than refusing to launch. A stale
+/// legacy directory left behind is inert.
+///
+/// This exists so the rename doesn't silently orphan a user's transcription
+/// history and saved recordings. It can be deleted a release or two after
+/// everyone has switched over.
+fn migrate_legacy_dir(base: &std::path::Path) {
+    let (legacy, current) = (base.join(LEGACY_DIR_NAME), base.join(DIR_NAME));
+    if legacy.is_dir() && !current.exists() {
+        let _ = std::fs::rename(&legacy, &current);
+    }
+}
+
+/// `~/.config/transcriber`, migrating the pre-rename directory if present.
+pub fn config_dir() -> PathBuf {
+    let base = dirs::config_dir().expect("could not locate config directory");
+    migrate_legacy_dir(&base);
+    base.join(DIR_NAME)
+}
+
+/// `~/.local/share/transcriber`, migrating the pre-rename directory if present.
+///
+/// Home of `history.db` and `recordings/`. Every consumer of those goes through
+/// here rather than re-deriving the path, so the migration happens exactly once
+/// no matter which binary starts first.
+pub fn data_dir() -> PathBuf {
+    let base = dirs::data_local_dir().expect("could not locate local data directory");
+    migrate_legacy_dir(&base);
+    base.join(DIR_NAME)
+}
+
 pub fn config_path() -> PathBuf {
-    dirs::config_dir()
-        .expect("could not locate config directory")
-        .join("voice-transcriber")
-        .join("config.json")
+    config_dir().join("config.json")
 }
 
 pub fn load() -> Result<AppConfig> {
@@ -310,4 +442,161 @@ pub fn save(cfg: &AppConfig) -> Result<()> {
     std::fs::create_dir_all(path.parent().unwrap())?;
     std::fs::write(&path, serde_json::to_string_pretty(cfg)?)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn cfg_with(vocab: &[&str]) -> AppConfig {
+        AppConfig {
+            vocabulary: vocab.iter().map(|s| (*s).to_string()).collect(),
+            ..AppConfig::default()
+        }
+    }
+
+    #[test]
+    fn default_config_ships_the_project_vocabulary() {
+        let cfg = AppConfig::default();
+        assert_eq!(cfg.active_prompt().as_deref(), Some("AccuDose, Safehous"));
+    }
+
+    #[test]
+    fn disabled_switch_withholds_the_prompt() {
+        let mut cfg = AppConfig::default();
+        cfg.vocabulary_enabled = false;
+        assert_eq!(cfg.active_prompt(), None);
+    }
+
+    #[test]
+    fn cohere_never_receives_a_prompt() {
+        let mut cfg = AppConfig::default();
+        cfg.provider = "cohere".into();
+        assert_eq!(cfg.active_prompt(), None);
+    }
+
+    #[test]
+    fn custom_endpoints_do_receive_a_prompt() {
+        let mut cfg = cfg_with(&["Kubernetes"]);
+        cfg.provider = "custom".into();
+        assert_eq!(cfg.active_prompt().as_deref(), Some("Kubernetes"));
+    }
+
+    #[test]
+    fn blank_and_whitespace_terms_are_dropped() {
+        let cfg = cfg_with(&["  AccuDose  ", "", "   ", "Safehous"]);
+        assert_eq!(cfg.active_prompt().as_deref(), Some("AccuDose, Safehous"));
+    }
+
+    #[test]
+    fn an_empty_list_sends_nothing_rather_than_an_empty_string() {
+        assert_eq!(cfg_with(&[]).active_prompt(), None);
+        assert_eq!(cfg_with(&["", "  "]).active_prompt(), None);
+    }
+
+    #[test]
+    fn overlong_lists_are_truncated_at_a_term_boundary() {
+        // 200 × "Chattanooga" is far past the 224-token budget.
+        let terms: Vec<String> = std::iter::repeat_n("Chattanooga".to_string(), 200).collect();
+        let cfg = AppConfig { vocabulary: terms, ..AppConfig::default() };
+        let prompt = cfg.active_prompt().expect("some terms should survive");
+
+        // Never exceeds the cap...
+        let kept: Vec<String> = prompt.split(", ").map(|s| s.to_string()).collect();
+        assert!(estimate_prompt_tokens(&kept) <= VOCABULARY_TOKEN_LIMIT);
+        // ...and cuts between terms, never mid-word.
+        assert!(kept.iter().all(|t| t == "Chattanooga"));
+        assert!(kept.len() < 200, "expected truncation, kept all {} terms", kept.len());
+    }
+
+    #[test]
+    fn a_partial_config_file_still_gets_the_vocabulary_defaults() {
+        // The NixOS home-manager activation hook writes config.json with a jq
+        // expression that emits only the fields it manages — every other field
+        // is expected to come from serde defaults on load. A new field that
+        // forgets `#[serde(default)]` would make that file fail to parse
+        // outright, taking the daemon down on the next switch.
+        let partial = r#"{
+            "provider": "groq",
+            "groq_api_key": "sk-test",
+            "groq_model": "whisper-large-v3-turbo",
+            "language": "en",
+            "sample_rate": 16000,
+            "vad_enabled": false,
+            "direct_injection": false
+        }"#;
+
+        let cfg: AppConfig = serde_json::from_str(partial).expect("partial config must parse");
+        assert!(cfg.vocabulary_enabled);
+        assert_eq!(cfg.active_prompt().as_deref(), Some("AccuDose, Safehous"));
+    }
+
+    /// Unique scratch directory. No `tempfile` dev-dependency for one test, and
+    /// no randomness needed — pid plus a counter is unique enough within a run.
+    fn scratch(tag: &str) -> PathBuf {
+        use std::sync::atomic::{AtomicU32, Ordering};
+        static N: AtomicU32 = AtomicU32::new(0);
+        let p = std::env::temp_dir().join(format!(
+            "transcriber-test-{}-{tag}-{}",
+            std::process::id(),
+            N.fetch_add(1, Ordering::Relaxed)
+        ));
+        std::fs::create_dir_all(&p).unwrap();
+        p
+    }
+
+    #[test]
+    fn legacy_state_directory_is_migrated_once() {
+        let base = scratch("migrate");
+        let legacy = base.join(LEGACY_DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::write(legacy.join("history.db"), b"pretend-sqlite").unwrap();
+
+        migrate_legacy_dir(&base);
+
+        let current = base.join(DIR_NAME);
+        assert!(current.is_dir(), "new directory should exist");
+        assert!(!legacy.exists(), "legacy directory should be gone");
+        assert_eq!(
+            std::fs::read(current.join("history.db")).unwrap(),
+            b"pretend-sqlite",
+            "history must survive the rename"
+        );
+
+        // Idempotent: a second call must not disturb anything.
+        migrate_legacy_dir(&base);
+        assert!(current.join("history.db").exists());
+    }
+
+    #[test]
+    fn migration_never_clobbers_existing_state() {
+        // Both directories present — the real one wins and is left untouched.
+        let base = scratch("clobber");
+        let legacy = base.join(LEGACY_DIR_NAME);
+        let current = base.join(DIR_NAME);
+        std::fs::create_dir_all(&legacy).unwrap();
+        std::fs::create_dir_all(&current).unwrap();
+        std::fs::write(legacy.join("history.db"), b"old").unwrap();
+        std::fs::write(current.join("history.db"), b"new").unwrap();
+
+        migrate_legacy_dir(&base);
+
+        assert_eq!(std::fs::read(current.join("history.db")).unwrap(), b"new");
+        assert!(legacy.exists(), "legacy dir is left alone, not deleted");
+    }
+
+    #[test]
+    fn migration_is_a_noop_with_nothing_to_migrate() {
+        let base = scratch("empty");
+        migrate_legacy_dir(&base);
+        assert!(!base.join(DIR_NAME).exists(), "must not create anything");
+    }
+
+    #[test]
+    fn the_token_estimate_stays_above_the_real_count() {
+        // "AccuDose" is 3 Whisper BPE tokens; the 3-chars-per-token estimate
+        // must not come in under that, or the cap could be breached silently.
+        let terms = vec!["AccuDose".to_string()];
+        assert!(estimate_prompt_tokens(&terms) >= 3);
+    }
 }

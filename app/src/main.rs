@@ -91,7 +91,7 @@ fn provider_str(idx: u32) -> &'static str {
 
 fn load_ext_settings() -> Option<gio::Settings> {
     let schema_dir = dirs::home_dir()?
-        .join(".local/share/gnome-shell/extensions/voice-transcriber@local/schemas");
+        .join(".local/share/gnome-shell/extensions/transcriber@local/schemas");
     let source = gio::SettingsSchemaSource::from_directory(
         schema_dir,
         gio::SettingsSchemaSource::default().as_ref(),
@@ -99,7 +99,7 @@ fn load_ext_settings() -> Option<gio::Settings> {
     )
     .ok()?;
     let schema = source.lookup(
-        "org.gnome.shell.extensions.voice-transcriber",
+        "org.gnome.shell.extensions.transcriber",
         false,
     )?;
     Some(gio::Settings::new_full(&schema, None::<&gio::SettingsBackend>, None))
@@ -239,7 +239,7 @@ fn build_ui(app: &adw::Application) {
 
     let menu = gio::Menu::new();
     menu.append(Some("Keyboard Shortcuts"), Some("app.shortcuts"));
-    menu.append(Some("About Voice Transcriber"), Some("app.about"));
+    menu.append(Some("About Transcriber"), Some("app.about"));
     let menu_btn = gtk4::MenuButton::builder()
         .icon_name("open-menu-symbolic")
         .menu_model(&menu)
@@ -266,7 +266,7 @@ fn build_ui(app: &adw::Application) {
 
     let window = adw::ApplicationWindow::builder()
         .application(app)
-        .title("Voice Transcriber")
+        .title("Transcriber")
         .default_width(640)
         .default_height(580)
         .width_request(360)
@@ -279,7 +279,7 @@ fn build_ui(app: &adw::Application) {
         let w = window.clone();
         move |_, _| {
             adw::AboutDialog::builder()
-                .application_name("Voice Transcriber")
+                .application_name("Transcriber")
                 .application_icon("audio-input-microphone-symbolic")
                 .developer_name("Craig")
                 .version("0.1.0")
@@ -513,6 +513,140 @@ fn build_settings_page(
     provider_group.add(&url_row);
     provider_group.add(&lang_row);
 
+    // ── Vocabulary group ────────────────────────────────────────────────────
+    let vocab_group = adw::PreferencesGroup::builder()
+        .title("Vocabulary")
+        .description(
+            "Spelling hints sent with every request — one term per line. \
+             Whisper reads them as the text immediately preceding your audio, \
+             which biases it toward these spellings for product names and jargon.",
+        )
+        .build();
+
+    let vocab_enable_row = adw::SwitchRow::builder()
+        .title("Send vocabulary")
+        .subtitle("Omits the hint entirely when off")
+        .active(saver.config.borrow().vocabulary_enabled)
+        .build();
+    vocab_enable_row.connect_active_notify({
+        let saver = saver.clone();
+        move |row| {
+            let on = row.is_active();
+            saver.update(|cfg| cfg.vocabulary_enabled = on);
+        }
+    });
+
+    let vocab_buffer = gtk4::TextBuffer::new(None);
+    vocab_buffer.set_text(&saver.config.borrow().vocabulary.join("\n"));
+
+    let vocab_view = gtk4::TextView::builder()
+        .buffer(&vocab_buffer)
+        .wrap_mode(gtk4::WrapMode::WordChar)
+        .top_margin(8)
+        .bottom_margin(8)
+        .left_margin(8)
+        .right_margin(8)
+        .build();
+
+    let vocab_scroll = gtk4::ScrolledWindow::builder()
+        .height_request(140)
+        .child(&vocab_view)
+        .build();
+
+    let vocab_frame = gtk4::Frame::builder().child(&vocab_scroll).build();
+    vocab_frame.add_css_class("card");
+
+    // Live budget readout. Whisper drops everything past 224 tokens without
+    // reporting it, so the only way a user learns their last few terms stopped
+    // working is if the GUI says so before the request is ever sent.
+    let vocab_counter = gtk4::Label::builder().halign(gtk4::Align::Start).build();
+    vocab_counter.add_css_class("caption");
+    vocab_counter.add_css_class("dim-label");
+
+    let update_vocab_counter = {
+        let vocab_counter = vocab_counter.clone();
+        move |terms: &[String]| {
+            let tokens = config::estimate_prompt_tokens(terms);
+            let limit = config::VOCABULARY_TOKEN_LIMIT;
+            vocab_counter.set_label(&format!(
+                "{} term{} · ~{tokens}/{limit} tokens",
+                terms.len(),
+                if terms.len() == 1 { "" } else { "s" },
+            ));
+            if tokens > limit {
+                vocab_counter.remove_css_class("dim-label");
+                vocab_counter.add_css_class("error");
+                vocab_counter.set_tooltip_text(Some(
+                    "Over Whisper's 224-token cap — terms past the limit are \
+                     dropped before sending. Estimate is deliberately high.",
+                ));
+            } else {
+                vocab_counter.remove_css_class("error");
+                vocab_counter.add_css_class("dim-label");
+                vocab_counter.set_tooltip_text(None);
+            }
+        }
+    };
+    update_vocab_counter(&saver.config.borrow().vocabulary);
+
+    vocab_buffer.connect_changed({
+        let saver = saver.clone();
+        move |buf| {
+            let text = buf
+                .text(&buf.start_iter(), &buf.end_iter(), false)
+                .to_string();
+            let terms: Vec<String> = text
+                .lines()
+                .map(|l| l.trim().to_string())
+                .filter(|l| !l.is_empty())
+                .collect();
+            update_vocab_counter(&terms);
+            saver.update(|cfg| cfg.vocabulary = terms);
+        }
+    });
+
+    let vocab_reset = gtk4::Button::builder()
+        .label("Reset to Default")
+        .halign(gtk4::Align::End)
+        .build();
+    vocab_reset.connect_clicked({
+        let vocab_buffer = vocab_buffer.clone();
+        move |_| vocab_buffer.set_text(&config::DEFAULT_VOCABULARY.join("\n"))
+    });
+
+    let vocab_box = gtk4::Box::builder()
+        .orientation(gtk4::Orientation::Vertical)
+        .spacing(8)
+        .build();
+    vocab_box.append(&vocab_frame);
+    vocab_box.append(&vocab_counter);
+    vocab_box.append(&vocab_reset);
+
+    vocab_group.add(&vocab_enable_row);
+    vocab_group.add(&vocab_box);
+
+    // Cohere's endpoint documents no `prompt` field, and `active_prompt()`
+    // withholds the hint there rather than risk a 400 on every request. Grey the
+    // group out to match, instead of leaving controls that silently do nothing.
+    // Registered as a *second* handler on the same signal — the one above owns
+    // migrating the key/model/URL fields, and this one only reads `selected()`,
+    // so the two are order-independent.
+    let sync_vocab_sensitivity = {
+        let vocab_group = vocab_group.clone();
+        move |provider: &str| {
+            let supported = provider != "cohere";
+            vocab_group.set_sensitive(supported);
+            vocab_group.set_tooltip_text(if supported {
+                None
+            } else {
+                Some("Cohere's transcription endpoint accepts no vocabulary hint.")
+            });
+        }
+    };
+    sync_vocab_sensitivity(&saver.config.borrow().provider);
+    provider_row
+        .connect_selected_notify(move |row| sync_vocab_sensitivity(provider_str(row.selected())));
+
     // ── Behaviour group ─────────────────────────────────────────────────────
     let behaviour_group = adw::PreferencesGroup::builder()
         .title("Behaviour")
@@ -714,6 +848,7 @@ fn build_settings_page(
 
     // ── Assemble ────────────────────────────────────────────────────────────
     page.add(&provider_group);
+    page.add(&vocab_group);
     page.add(&behaviour_group);
     page.add(&streaming_group);
     page.add(&audio_group);
@@ -935,7 +1070,7 @@ struct HistoryEntry {
 }
 
 fn db_path() -> Option<std::path::PathBuf> {
-    Some(dirs::data_local_dir()?.join("voice-transcriber").join("history.db"))
+    Some(config::data_dir().join("history.db"))
 }
 
 fn latest_history_id() -> i64 {
@@ -1431,29 +1566,29 @@ fn service_active(service: &str) -> bool {
 
 fn check_daemon_installed() -> bool {
     binary_available(
-        "voice-transcriber-daemon",
-        ".local/bin/voice-transcriber-daemon",
+        "transcriber-daemon",
+        ".local/bin/transcriber-daemon",
     )
 }
 
 fn check_daemon_running() -> bool {
-    service_active("voice-transcriber-daemon.service")
+    service_active("transcriber-daemon.service")
 }
 
 fn check_overlay_installed() -> bool {
     binary_available(
-        "voice-transcriber-overlay",
-        ".local/bin/voice-transcriber-overlay",
+        "transcriber-overlay",
+        ".local/bin/transcriber-overlay",
     )
 }
 
 fn check_overlay_running() -> bool {
-    service_active("voice-transcriber-overlay.service")
+    service_active("transcriber-overlay.service")
 }
 
 fn check_extension_installed() -> bool {
     dirs::data_local_dir()
-        .map(|d| d.join("gnome-shell/extensions/voice-transcriber@local").exists())
+        .map(|d| d.join("gnome-shell/extensions/transcriber@local").exists())
         .unwrap_or(false)
 }
 
@@ -1461,7 +1596,7 @@ fn check_extension_loaded() -> bool {
     std::process::Command::new("gnome-extensions")
         .args(["list"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("voice-transcriber@local"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("transcriber@local"))
         .unwrap_or(false)
 }
 
@@ -1469,7 +1604,7 @@ fn check_extension_enabled() -> bool {
     std::process::Command::new("gsettings")
         .args(["get", "org.gnome.shell", "enabled-extensions"])
         .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains("voice-transcriber@local"))
+        .map(|o| String::from_utf8_lossy(&o.stdout).contains("transcriber@local"))
         .unwrap_or(false)
 }
 
@@ -1497,9 +1632,9 @@ const DAEMON_RUNNING_CHECK: StatusCheck = StatusCheck {
     run:      check_daemon_running,
     fix:      Some(FixAction::RunCommand {
         btn_label: "Start daemon",
-        _cmd:      "systemctl --user enable --now voice-transcriber-daemon.service",
+        _cmd:      "systemctl --user enable --now transcriber-daemon.service",
         program:   "systemctl",
-        args:      &["--user", "enable", "--now", "voice-transcriber-daemon.service"],
+        args:      &["--user", "enable", "--now", "transcriber-daemon.service"],
     }),
 };
 
@@ -1543,9 +1678,9 @@ const GNOME_CHECKS: &[StatusCheck] = &[
         run:      check_extension_enabled,
         fix:      Some(FixAction::RunCommand {
             btn_label: "Enable extension",
-            _cmd:      "gnome-extensions enable voice-transcriber@local",
+            _cmd:      "gnome-extensions enable transcriber@local",
             program:   "gnome-extensions",
-            args:      &["enable", "voice-transcriber@local"],
+            args:      &["enable", "transcriber@local"],
         }),
     },
     API_KEY_CHECK,
@@ -1573,9 +1708,9 @@ const WLROOTS_CHECKS: &[StatusCheck] = &[
         run:      check_overlay_running,
         fix:      Some(FixAction::RunCommand {
             btn_label: "Start overlay",
-            _cmd:      "systemctl --user enable --now voice-transcriber-overlay.service",
+            _cmd:      "systemctl --user enable --now transcriber-overlay.service",
             program:   "systemctl",
-            args:      &["--user", "enable", "--now", "voice-transcriber-overlay.service"],
+            args:      &["--user", "enable", "--now", "transcriber-overlay.service"],
         }),
     },
     API_KEY_CHECK,

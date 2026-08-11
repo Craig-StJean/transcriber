@@ -1,6 +1,6 @@
-/* ── Voice Transcriber overlay ───────────────────────────────────────────── */
+/* ── Transcriber overlay ───────────────────────────────────────────── */
 
-.voice-transcriber-overlay {
+.transcriber-overlay {
     background-color: rgba(18, 18, 18, 0.88);
     border-radius: 14px;
     padding: 10px 22px;
@@ -9,18 +9,18 @@
     box-shadow: 0 4px 24px rgba(0, 0, 0, 0.5);
 }
 
-.voice-transcriber-label {
+.transcriber-label {
     color: #ffffff;
     font-size: 15px;
     font-weight: bold;
     text-shadow: 0 1px 4px rgba(0, 0, 0, 0.8);
 }
 
-.voice-transcriber-bars {
+.transcriber-bars {
     spacing: 3px;
 }
 
-.voice-transcriber-bar {
+.transcriber-bar {
     width: 3px;
     height: 14px;
     background-color: #4ade80;

@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <schemalist>
-  <schema id="org.gnome.shell.extensions.voice-transcriber"
-          path="/org/gnome/shell/extensions/voice-transcriber/">
+  <schema id="org.gnome.shell.extensions.transcriber"
+          path="/org/gnome/shell/extensions/transcriber/">
 
     <!--
       Type 'as' (array of strings) is required by Main.wm.addKeybinding().

@@ -2,7 +2,7 @@ flake:
 { config, lib, pkgs, ... }:
 
 let
-  cfg = config.programs.voice-transcriber;
+  cfg = config.programs.transcriber;
   system = pkgs.stdenv.hostPlatform.system;
 
   # DBus activation file content. Exec= is required by the spec but ignored
@@ -12,18 +12,18 @@ let
     [D-BUS Service]
     Name=org.transcriber.Daemon
     Exec=${pkgs.coreutils}/bin/true
-    SystemdService=voice-transcriber-daemon.service
+    SystemdService=transcriber-daemon.service
   '';
 in {
-  options.programs.voice-transcriber = {
-    enable = lib.mkEnableOption "voice-transcriber (voice-to-text daemon + Wayland overlay)";
+  options.programs.transcriber = {
+    enable = lib.mkEnableOption "transcriber (voice-to-text daemon + Wayland overlay)";
 
     package = lib.mkOption {
       type = lib.types.package;
       default = flake.packages.${system}.default;
-      defaultText = lib.literalExpression "voice-transcriber.packages.\${system}.default";
+      defaultText = lib.literalExpression "transcriber.packages.\${system}.default";
       description = ''
-        The voice-transcriber package providing the daemon, overlay, and
+        The transcriber package providing the daemon, overlay, and
         settings binaries. Defaults to this flake's build of the workspace.
       '';
     };
@@ -77,7 +77,7 @@ in {
         }
       '';
       description = ''
-        Declarative contents of ~/.config/voice-transcriber/config.json.
+        Declarative contents of ~/.config/transcriber/config.json.
         Leave null to let the daemon write its own defaults on first run,
         or to manage the file via the settings GUI. Note: if you set this,
         edits made through the settings GUI will be overwritten on the next
@@ -95,17 +95,17 @@ in {
     xdg.dataFile."dbus-1/services/org.transcriber.Daemon.service".text = dbusServiceText;
 
     # ── Daemon ──────────────────────────────────────────────────────────────
-    systemd.user.services.voice-transcriber-daemon = {
+    systemd.user.services.transcriber-daemon = {
       Unit = {
-        Description = "Voice Transcriber Daemon";
-        Documentation = "https://github.com/local/voice-transcriber";
+        Description = "Transcriber Daemon";
+        Documentation = "https://github.com/Craig-StJean/transcriber";
         After = [ "graphical-session.target" ];
         PartOf = [ "graphical-session.target" ];
       };
       Service = {
         Type = "dbus";
         BusName = "org.transcriber.Daemon";
-        ExecStart = "${cfg.package}/bin/voice-transcriber-daemon";
+        ExecStart = "${cfg.package}/bin/transcriber-daemon";
         Restart = "on-failure";
         RestartSec = 3;
         Environment = [
@@ -119,16 +119,16 @@ in {
     };
 
     # ── Overlay ─────────────────────────────────────────────────────────────
-    systemd.user.services.voice-transcriber-overlay = lib.mkIf cfg.enableOverlay {
+    systemd.user.services.transcriber-overlay = lib.mkIf cfg.enableOverlay {
       Unit = {
-        Description = "Voice Transcriber Overlay (wlroots/KDE)";
-        Documentation = "https://github.com/local/voice-transcriber";
-        After = [ "graphical-session.target" "voice-transcriber-daemon.service" ];
+        Description = "Transcriber Overlay (wlroots/KDE)";
+        Documentation = "https://github.com/Craig-StJean/transcriber";
+        After = [ "graphical-session.target" "transcriber-daemon.service" ];
         PartOf = [ "graphical-session.target" ];
       };
       Service = {
         Type = "simple";
-        ExecStart = "${cfg.package}/bin/voice-transcriber-overlay";
+        ExecStart = "${cfg.package}/bin/transcriber-overlay";
         Restart = "on-failure";
         RestartSec = 3;
         Environment = [
@@ -143,10 +143,10 @@ in {
 
     # ── Settings GUI .desktop entry ─────────────────────────────────────────
     xdg.desktopEntries = lib.mkIf cfg.enableSettingsApp {
-      voice-transcriber-settings = {
-        name = "Voice Transcriber Settings";
+      transcriber-settings = {
+        name = "Transcriber Settings";
         comment = "Configure voice transcription and view history";
-        exec = "${cfg.package}/bin/voice-transcriber-settings";
+        exec = "${cfg.package}/bin/transcriber-settings";
         icon = "audio-input-microphone";
         terminal = false;
         type = "Application";
@@ -159,7 +159,7 @@ in {
     };
 
     # ── Optional declarative config.json ───────────────────────────────────
-    xdg.configFile."voice-transcriber/config.json" = lib.mkIf (cfg.config != null) {
+    xdg.configFile."transcriber/config.json" = lib.mkIf (cfg.config != null) {
       text = builtins.toJSON cfg.config;
     };
   };

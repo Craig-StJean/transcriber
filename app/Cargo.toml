@@ -1,14 +1,15 @@
 [package]
-name    = "voice-transcriber-settings"
+name    = "transcriber-settings"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
-name = "voice-transcriber-settings"
+name = "transcriber-settings"
 path = "src/main.rs"
 
 [dependencies]
-common = { path = "../common", package = "voice-transcriber-common" }
+common = { path = "../common", package = "transcriber-common" }
 
 gtk4       = { version = "0.11", features = ["blueprint"] }
 libadwaita = { version = "0.9", features = ["v1_9"] }

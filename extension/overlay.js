@@ -31,25 +31,25 @@ export class RecordingOverlay {
         const y = monitor.y + monitor.height - 140;
 
         this._box = new St.BoxLayout({
-            style_class: 'voice-transcriber-overlay',
+            style_class: 'transcriber-overlay',
             vertical: false,
             reactive: false,
         });
 
         this._label = new St.Label({
             text: message,
-            style_class: 'voice-transcriber-label',
+            style_class: 'transcriber-label',
             y_align: Clutter.ActorAlign.CENTER,
             visible: false,
         });
 
         // ── VU meter bars — sized entirely by CSS ─────────────────────────────
         const barsBox = new St.BoxLayout({
-            style_class: 'voice-transcriber-bars',
+            style_class: 'transcriber-bars',
             y_align: Clutter.ActorAlign.CENTER,
         });
         this._bars = Array.from({ length: N_BARS }, () => {
-            const bar = new St.Widget({ style_class: 'voice-transcriber-bar' });
+            const bar = new St.Widget({ style_class: 'transcriber-bar' });
             bar.set_opacity(60);
             barsBox.add_child(bar);
             return bar;

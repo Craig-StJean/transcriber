@@ -1,25 +1,25 @@
 #!/usr/bin/env bash
-# Automatic update checker for Voice Transcriber.
-# Called by the voice-transcriber-update.timer systemd unit.
+# Automatic update checker for Transcriber.
+# Called by the transcriber-update.timer systemd unit.
 # Downloads and installs new releases silently with desktop notifications.
 set -euo pipefail
 
 REPO="Craig-StJean/transcriber"
-DATA_DIR="$HOME/.local/share/voice-transcriber"
-CONFIG_DIR="$HOME/.config/voice-transcriber"
+DATA_DIR="$HOME/.local/share/transcriber"
+CONFIG_DIR="$HOME/.config/transcriber"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
-EXT_DIR="$HOME/.local/share/gnome-shell/extensions/voice-transcriber@local"
+EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
 
-LOG_TAG="voice-transcriber-update"
+LOG_TAG="transcriber-update"
 
 log() { echo "$LOG_TAG: $1"; }
 
 notify() {
     # Try notify-send; fall back to just logging
-    notify-send -a "Voice Transcriber" "Voice Transcriber" "$1" 2>/dev/null || true
+    notify-send -a "Transcriber" "Transcriber" "$1" 2>/dev/null || true
 }
 
 # ── Read current version ─────────────────────────────────────────────────────
@@ -103,7 +103,7 @@ gh_api -H "Accept: application/octet-stream" "$ASSET_URL" \
 }
 
 tar xzf "$TMPDIR/release.tar.gz" -C "$TMPDIR"
-RELEASE_DIR="$(find "$TMPDIR" -maxdepth 1 -type d -name 'voice-transcriber-*' | head -1)"
+RELEASE_DIR="$(find "$TMPDIR" -maxdepth 1 -type d -name 'transcriber-*' | head -1)"
 if [[ ! -d "$RELEASE_DIR" ]]; then
     log "Unexpected tarball structure"
     exit 0
@@ -111,25 +111,25 @@ fi
 
 # ── Stop daemon ──────────────────────────────────────────────────────────────
 
-if systemctl --user is-active --quiet voice-transcriber-daemon.service 2>/dev/null; then
-    systemctl --user stop voice-transcriber-daemon.service
+if systemctl --user is-active --quiet transcriber-daemon.service 2>/dev/null; then
+    systemctl --user stop transcriber-daemon.service
 fi
 
 # ── Install files ────────────────────────────────────────────────────────────
 
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-daemon"   "$BIN_DIR/"
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-settings"  "$BIN_DIR/" 2>/dev/null || {
-    rm -f "$BIN_DIR/voice-transcriber-settings"
-    install -m755 "$RELEASE_DIR/bin/voice-transcriber-settings" "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-daemon"   "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-settings"  "$BIN_DIR/" 2>/dev/null || {
+    rm -f "$BIN_DIR/transcriber-settings"
+    install -m755 "$RELEASE_DIR/bin/transcriber-settings" "$BIN_DIR/"
 }
-install -m755 "$RELEASE_DIR/bin/voice-transcriber-overlay"   "$BIN_DIR/" 2>/dev/null || {
-    rm -f "$BIN_DIR/voice-transcriber-overlay"
-    install -m755 "$RELEASE_DIR/bin/voice-transcriber-overlay" "$BIN_DIR/"
+install -m755 "$RELEASE_DIR/bin/transcriber-overlay"   "$BIN_DIR/" 2>/dev/null || {
+    rm -f "$BIN_DIR/transcriber-overlay"
+    install -m755 "$RELEASE_DIR/bin/transcriber-overlay" "$BIN_DIR/"
 }
 
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-daemon.service" "$SYSTEMD_DIR/"
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-update.service" "$SYSTEMD_DIR/"
-install -m644 "$RELEASE_DIR/deploy/voice-transcriber-update.timer"   "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-daemon.service" "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-update.service" "$SYSTEMD_DIR/"
+install -m644 "$RELEASE_DIR/deploy/transcriber-update.timer"   "$SYSTEMD_DIR/"
 install -m644 "$RELEASE_DIR/deploy/org.transcriber.Daemon.service"   "$DBUS_SERVICES_DIR/"
 install -m644 "$RELEASE_DIR/deploy/org.transcriber.Settings.desktop"  "$APPLICATIONS_DIR/"
 
@@ -150,7 +150,7 @@ install -m755 "$RELEASE_DIR/scripts/check-update.sh" "$DATA_DIR/"
 # ── Restart services ─────────────────────────────────────────────────────────
 
 systemctl --user daemon-reload
-systemctl --user start voice-transcriber-daemon.service
+systemctl --user start transcriber-daemon.service
 
 # ── Write version (last!) ────────────────────────────────────────────────────
 

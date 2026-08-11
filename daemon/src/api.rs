@@ -3,12 +3,17 @@ use reqwest::multipart;
 
 /// POST `wav_bytes` to an OpenAI-compatible `/audio/transcriptions` endpoint
 /// and return the transcribed text.
+///
+/// `prompt` is Whisper's spelling/style hint (see `AppConfig::active_prompt`).
+/// It is capped at 224 tokens upstream and silently truncated beyond that, so
+/// callers should budget for the limit rather than relying on the API to say so.
 pub async fn transcribe(
     client: &reqwest::Client,
     api_url: &str,
     api_key: &str,
     model: &str,
     language: Option<&str>,
+    prompt: Option<&str>,
     wav_bytes: Vec<u8>,
 ) -> Result<String> {
     let file_part = multipart::Part::bytes(wav_bytes)
@@ -21,6 +26,10 @@ pub async fn transcribe(
 
     if let Some(lang) = language {
         form = form.text("language", lang.to_string());
+    }
+
+    if let Some(p) = prompt.filter(|p| !p.is_empty()) {
+        form = form.text("prompt", p.to_string());
     }
 
     let response = client

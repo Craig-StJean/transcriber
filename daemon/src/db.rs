@@ -22,10 +22,7 @@ pub struct Database {
 
 impl Database {
     pub fn open() -> Result<Self> {
-        let path = dirs::data_local_dir()
-            .expect("could not locate local data directory")
-            .join("voice-transcriber")
-            .join("history.db");
+        let path = common::config::data_dir().join("history.db");
 
         std::fs::create_dir_all(path.parent().unwrap())?;
 

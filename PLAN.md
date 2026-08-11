@@ -29,7 +29,7 @@ To survive Wayland's strict security model and remain portable, the "Brain" (aud
 ### 3. Settings & History App (`app/` - Rust)
 * **Role:** User configuration and viewing past transcriptions.
 * **Tech:** GTK4 + Libadwaita + Blueprint.
-* **Behavior:** Reads/writes to `~/.config/voice-transcriber/config.json`. Talks to the daemon via DBus to trigger retries or update settings on the fly. 
+* **Behavior:** Reads/writes to `~/.config/transcriber/config.json`. Talks to the daemon via DBus to trigger retries or update settings on the fly. 
 
 ---
 
@@ -125,7 +125,7 @@ sudo dnf install -y gtk4-layer-shell         # runtime .so
 | `overlay/src/daemon_proxy.rs` | `#[zbus::proxy]` for `org.transcriber.Daemon`; streams `StateChanged`, `AudioLevel`, `TranscriptionReady` to the GTK thread |
 | `overlay/src/shortcuts.rs` | XDG `GlobalShortcuts` portal via `ashpd`; maps activations to `StartRecording` / `StopRecording` / `Cancel` DBus calls |
 | `overlay/src/overlay_window.rs` | `gtk4-layer-shell` window anchored to the bottom-centre of the screen; VU bars + status label; generation-based fade animation |
-| `deploy/voice-transcriber-overlay.service` | Systemd user service (mirrors the daemon service) |
+| `deploy/transcriber-overlay.service` | Systemd user service (mirrors the daemon service) |
 
 ### Key dependencies
 * **`gtk4-layer-shell = "0.8"`** — Rust bindings for the C `gtk4-layer-shell` library. Implements the `wlr-layer-shell-unstable-v1` Wayland protocol. Provides the `LayerShell` trait on `gtk::ApplicationWindow`.
@@ -175,13 +175,13 @@ hotkeys — the overlay will still respond to DBus signals normally.
 sudo dnf install -y gtk4-layer-shell-devel
 
 # Build
-cargo build --release -p voice-transcriber-overlay
+cargo build --release -p transcriber-overlay
 
 # Install binary
-install -Dm755 target/release/voice-transcriber-overlay ~/.local/bin/
+install -Dm755 target/release/transcriber-overlay ~/.local/bin/
 
 # Enable systemd service (on a wlroots/KDE session)
-systemctl --user enable --now voice-transcriber-overlay
+systemctl --user enable --now transcriber-overlay
 ```
 
 ### Compatibility notes

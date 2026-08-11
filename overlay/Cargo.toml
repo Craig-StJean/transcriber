@@ -1,15 +1,16 @@
 [package]
-name    = "voice-transcriber-overlay"
+name    = "transcriber-overlay"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [[bin]]
-name = "voice-transcriber-overlay"
+name = "transcriber-overlay"
 path = "src/main.rs"
 
 [dependencies]
 # Shared config + DBus constants
-common = { path = "../common", package = "voice-transcriber-common" }
+common = { path = "../common", package = "transcriber-common" }
 
 # Async runtime
 tokio = { workspace = true }
