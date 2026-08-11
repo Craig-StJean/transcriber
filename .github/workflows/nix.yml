@@ -1,16 +1,22 @@
 name: Nix build & cache
 
-# Builds the flake and pushes every resulting store path to a Cachix binary
-# cache, so consumers (system-config, the colleague's config) install a download
-# instead of compiling the Rust + GTK4 stack themselves.
+# Builds the flake, and — when a Cachix cache is configured — pushes every
+# resulting store path to it, so consumers (system-config, the colleague's
+# config) install a download instead of compiling the Rust + GTK4 stack.
 #
-# One-time setup, both outside this file:
-#   1. Create the cache at https://app.cachix.org (name below must match).
-#   2. Generate a write token: `cachix authtoken --validity 1y`, then add it as
-#      the repo secret CACHIX_AUTH_TOKEN
-#      (Settings → Secrets and variables → Actions).
+# The cache is OPTIONAL. Without it this workflow still builds the package and
+# runs the tests; it just doesn't publish the results. That is deliberate: a
+# missing token should not be able to mask a genuine build or test failure.
 #
-# Consumers then add the cache as a substituter — see README.md.
+# One-time setup to enable publishing, both outside this file:
+#   1. Create a cache named `craig-transcriber` at https://app.cachix.org
+#      (must match CACHE_NAME below — Cachix names are globally unique).
+#   2. Generate a write token — on the cache's Settings → Auth Tokens page, or
+#      `cachix authtoken --validity 1y` — and add it as the repo secret
+#      CACHIX_AUTH_TOKEN under Settings → Secrets and variables → Actions.
+#
+# Consumers then add the cache as a substituter, using the *public* key shown
+# on the cache page — see README.md.
 
 on:
   push:
@@ -25,9 +31,21 @@ concurrency:
   group: nix-${{ github.ref }}
   cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/') }}
 
+env:
+  CACHE_NAME: craig-transcriber
+
 jobs:
   build:
     runs-on: ubuntu-latest
+
+    # Mapped to a job-level env var so the steps below can branch on whether it
+    # is set. A step's `if:` cannot read the `secrets` context directly, but it
+    # can read `env`. This is what makes the cache optional rather than
+    # mandatory — and it also covers pull requests from forks, which are never
+    # given repo secrets.
+    env:
+      CACHIX_AUTH_TOKEN: ${{ secrets.CACHIX_AUTH_TOKEN }}
+
     steps:
       - uses: actions/checkout@v7
 
@@ -37,16 +55,21 @@ jobs:
             experimental-features = nix-command flakes
 
       - uses: cachix/cachix-action@v17
+        if: env.CACHIX_AUTH_TOKEN != ''
         with:
-          name: craig-transcriber
-          authToken: "${{ secrets.CACHIX_AUTH_TOKEN }}"
-          # Pull requests from forks cannot read repo secrets, so pushing would
-          # fail the job. Build and verify there, publish only from this repo.
-          skipPush: ${{ github.event_name == 'pull_request' }}
+          name: ${{ env.CACHE_NAME }}
+          authToken: ${{ env.CACHIX_AUTH_TOKEN }}
+
+      # Says out loud why nothing was published, so a silently-unpopulated cache
+      # is never a mystery six months from now.
+      - name: Note that caching is disabled
+        if: env.CACHIX_AUTH_TOKEN == ''
+        run: |
+          echo "::notice title=Cachix disabled::No CACHIX_AUTH_TOKEN secret is set, so build outputs will not be published to the '${CACHE_NAME}' cache. The build and tests below still run. See the header of .github/workflows/nix.yml for the one-time setup."
 
       # Builds the package and, because doCheck is on, runs the `common` crate's
-      # unit tests as part of it. cachix-action pushes whatever lands in the
-      # store when the job finishes.
+      # unit tests as part of it. When the cachix step ran, it pushes whatever
+      # lands in the store as the job finishes.
       - name: Build package
         run: nix build .#default --print-build-logs
 
