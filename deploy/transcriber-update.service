@@ -6,3 +6,11 @@ Wants=network-online.target
 [Service]
 Type=oneshot
 ExecStart=%h/.local/share/transcriber/check-update.sh
+
+# Hardening: the updater only needs to write the install locations below.
+# "-" ignores a path that doesn't exist (e.g. no GNOME extension dir).
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=-%h/.local/bin -%h/.local/share/transcriber -%h/.config/transcriber -%h/.config/systemd/user -%h/.local/share/dbus-1/services -%h/.local/share/applications -%h/.local/share/gnome-shell/extensions/transcriber@local
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK

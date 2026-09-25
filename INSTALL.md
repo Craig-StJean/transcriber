@@ -9,13 +9,12 @@ sudo dnf install -y \
     alsa-lib-devel \
     gtk4-devel \
     libadwaita-devel \
-    blueprint-compiler \
     glib2-devel
 ```
 
 ### Rust toolchain
 
-Rust 1.92 or later is required.
+Rust 1.92 or later is required (`rust-toolchain.toml` pins it; rustup picks it up automatically).
 
 ```bash
 # Install rustup if not already installed
@@ -92,7 +91,17 @@ If the extension does not appear in the list, restart GNOME Shell first:
 
 Press **Super+'** (Super + apostrophe) to start recording. Press it again to stop and transcribe.
 
-The default keybinding is `<Super>apostrophe`. Rebind it via the **Settings** app, the extension preferences, or GNOME Settings → Keyboard.
+The default keybinding is `<Super>apostrophe`. Rebind it in the extension preferences (`gnome-extensions prefs transcriber@local`). Escape cancels, and is only grabbed while a recording is in progress. The preferences also offer push-to-talk and a re-paste-last shortcut.
+
+### Other Wayland desktops (Hyprland, Sway, KDE)
+
+On a non-GNOME session `install.sh` also builds and installs the overlay, but doesn't enable it:
+
+```bash
+systemctl --user enable --now transcriber-overlay.service
+```
+
+The portal will propose Super+' as the default shortcut.
 
 ---
 
@@ -136,17 +145,15 @@ systemctl --user daemon-reload
 
 ## Update
 
-After pulling new code, re-run the installer:
+For a source install, run:
 
 ```bash
-bash install.sh
+bash update.sh
 ```
 
-Then restart the daemon to pick up the new binary:
+It pulls, rebuilds, reinstalls binaries and unit files that changed, and restarts the daemon when needed. Source installs never auto-update: `install.sh` marks the version `+git` and leaves the release update timer off, so a release build can't silently replace your local one.
 
-```bash
-systemctl --user restart transcriber-daemon.service
-```
+Release installs (`install-remote.sh`) update via a daily timer. Each download is checked against the release's `SHA256SUMS` before installing. The installer needs `jq`, and never stores your `gh` token; it only saves a token you paste (fine-grained, read-only is enough) to `~/.config/transcriber/github-token` with mode 0600.
 
 ---
 

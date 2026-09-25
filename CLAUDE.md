@@ -13,7 +13,7 @@ Four Rust workspace crates + one GNOME Shell extension, communicating over DBus 
 | Crate | Binary | Role |
 |-------|--------|------|
 | `common` | (library) | Shared `AppConfig`, DBus constants, config load/save |
-| `daemon` | `transcriber-daemon` | Headless systemd service: audio capture (cpal), API calls (reqwest), clipboard (wl-clipboard-rs), history (rusqlite), streaming (tokio-tungstenite) |
+| `daemon` | `transcriber-daemon` | Headless systemd service: audio capture (cpal), API calls (reqwest), history (rusqlite), streaming (tokio-tungstenite). No clipboard — clients (extension/overlay) deliver the text |
 | `app` | `transcriber-settings` | GTK4/Libadwaita settings GUI and history viewer |
 | `overlay` | `transcriber-overlay` | Wlroots overlay for KDE/Sway/Hyprland (gtk4-layer-shell, ashpd GlobalShortcuts, enigo text injection) |
 | `extension/` | (JS) | GNOME Shell extension: hotkey binding, VU meter overlay, DBus client |
@@ -22,16 +22,20 @@ The daemon is the core — it owns all state, runs as a systemd user service, an
 
 ### DBus Interface (`org.transcriber.Daemon`)
 
-- **Signals:** `StateChanged(state)`, `TranscriptionReady(text)`, `TranscriptionChunk(text)`, `AudioLevel(level)`
+- **Signals:** `StateChanged(state)`, `ErrorOccurred(message)` (sent just before `StateChanged("Error")`), `TranscriptionReady(text)`, `TranscriptionChunk(text)`, `AudioLevel(level)`
 - **Methods:** `StartRecording`, `StopRecording`, `Cancel`, `GetHistory(limit)`, `DeleteHistoryEntry(id)`, `ClearHistory`, `RetryTranscription(id, wav_path)`, `ReloadConfig`
-- **Property:** `CurrentState` — Idle | Recording | Transcribing | Streaming | Done | Error
+  - `RetryTranscription` ignores `wav_path` (kept for compatibility) and looks the WAV up by id; it runs post-processing like a normal recording.
+  - `DeleteHistoryEntry` / `ClearHistory` also delete the WAVs. The settings app goes through these rather than writing SQLite itself.
+- **Property:** `CurrentState` — Idle | Recording | Transcribing | PostProcessing | Streaming | Done | Error (emits `PropertiesChanged`)
 
 ### Daemon State Machine
 
-`Idle → Recording → Transcribing → Done` (batch path)
+`Idle → Recording → Transcribing → [PostProcessing →] Done` (batch path)
 `Idle → Recording → Streaming → Done` (streaming path, requires direct_injection)
 
-VAD (voice activity detection) can auto-trigger stop after ~1.5s silence.
+- Every `StartRecording`/`Cancel` bumps a session *generation*; background tasks only emit signals, write history or change state while their generation is current. That is what makes Cancel silent and stops a stale pipeline clobbering a newer recording. Keep new async work gated on it.
+- `StopRecording`, VAD (voice activity detection) auto-stop after ~1.5 s silence, and the `max_recording_secs` cap all go through one `stop()` that compare-and-sets out of Recording, so only one of them wins.
+- Empty recordings (< 0.3 s, or no speech seen with VAD on) go straight to Idle with no API call and no history row.
 
 ### Data Paths
 
@@ -62,11 +66,15 @@ bash update.sh
 ### System Dependencies (Fedora)
 
 ```
-alsa-lib-devel gtk4-devel libadwaita-devel blueprint-compiler
+alsa-lib-devel gtk4-devel libadwaita-devel
 gtk4-layer-shell-devel   # only for overlay crate
 ```
 
-Rust 1.91+, GNOME Shell 45–50, libadwaita 1.9+, PipeWire or ALSA.
+Rust 1.92+ (pinned in `rust-toolchain.toml`), GNOME Shell 47–50, libadwaita 1.9+, PipeWire or ALSA.
+
+On NixOS, plain `cargo` can't find ALSA; run it via `nix develop --command cargo …`.
+
+The code hand-aligns `=` and match arms into columns — don't run `cargo fmt` over it. CI runs clippy with `-D warnings` and the workspace tests.
 
 ## Service Management
 
@@ -100,7 +108,9 @@ Provider selection is in `AppConfig.provider` / `AppConfig.streaming_provider`. 
 - **Truncation is ours, not the API's.** Whisper silently drops everything past 224 tokens, so `active_prompt()` cuts at a term boundary first. `estimate_prompt_tokens()` intentionally over-counts (3 chars/token) because this field holds proper nouns, which BPE splits far worse than prose.
 - **The prompt is a bare comma-separated list**, not a sentence. Whisper conditions on it as preceding transcript text, so instructions written into it are not followed — they leak into the output as transcribed words.
 
-On NixOS, `home/transcriber.nix` in the system-config repo merges its declared fields *onto* the existing `config.json` rather than rebuilding it, so GUI-edited vocabulary survives a switch. Adding a field there that the GUI also owns will clobber it.
+On NixOS, the home-manager module (`nix/hm-module.nix`) merges `programs.transcriber.config` *onto* the existing `config.json` with jq at activation, rather than linking a read-only file, so GUI-edited vocabulary survives a switch. Declaring a field there that the GUI also owns will clobber the GUI's value on every switch.
+
+`config::save()` writes atomically (temp file + rename) with mode 0600; `config::update(f)` applies an edit to a fresh read, which is how the settings app avoids reverting changes made elsewhere.
 
 ## Extension Development
 

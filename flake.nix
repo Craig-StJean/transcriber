@@ -35,7 +35,16 @@
           overlays = [ rust-overlay.overlays.default ];
         };
 
-        rustToolchain = pkgs.rust-bin.stable.latest.default;
+        # Same pinned toolchain (MSRV + clippy and the formatter) that rustup,
+        # CI and the release build use. The fallback only matters while the
+        # file is untracked (flakes can't see untracked files).
+        rustToolchain =
+          if builtins.pathExists ./rust-toolchain.toml
+          then pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml
+          else pkgs.rust-bin.stable.latest.default;
+
+        # Single source of truth for the version: the workspace Cargo.toml.
+        cargoVersion = (builtins.fromTOML (builtins.readFile ./Cargo.toml)).workspace.package.version;
 
         rustPlatform = pkgs.makeRustPlatform {
           cargo = rustToolchain;
@@ -46,12 +55,9 @@
         # - pkg-config: locate system libs (gtk4, alsa, …)
         # - wrapGAppsHook4: wraps installed GTK4 binaries so they can find GSettings
         #   schemas, GDK-pixbuf loaders, libadwaita styling, etc. at runtime.
-        # - blueprint-compiler: invoked by gtk4-rs build script for the
-        #   "blueprint" feature (used by the settings app to compile .blp → .ui).
         nativeBuildInputs = with pkgs; [
           pkg-config
           wrapGAppsHook4
-          blueprint-compiler
         ];
 
         # Runtime + link-time C libs the three binaries collectively need.
@@ -81,7 +87,7 @@
 
         transcriber = rustPlatform.buildRustPackage {
           pname = "transcriber";
-          version = "0.1.0";
+          version = cargoVersion;
 
           src = ./.;
           cargoLock.lockFile = ./Cargo.lock;
@@ -95,14 +101,12 @@
             "-p" "transcriber-settings"
           ];
 
-          # Run the `common` crate's unit tests as part of the build. Scoped to
-          # that one package on purpose: it is the only crate with tests, and
-          # building the daemon/overlay/settings test harnesses would pull in
-          # their dev-dependencies for nothing. The tests are pure logic (config
-          # parsing, prompt budgeting) with no filesystem or network access, so
-          # they run fine in the Nix sandbox.
+          # Run every workspace crate's tests as part of the build. They are
+          # pure logic (no display or network), so they run in the Nix sandbox;
+          # buildInputs above already carries every C library the test
+          # harnesses link (incl. gtk4-layer-shell for the overlay).
           doCheck = true;
-          cargoTestFlags = [ "-p" "transcriber-common" ];
+          cargoTestFlags = [ "--workspace" ];
 
           # wrapGAppsHook4 will wrap every binary in $out/bin. The daemon doesn't
           # need GTK env, but wrapping is harmless for it. We just need the GTK

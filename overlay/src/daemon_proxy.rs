@@ -1,12 +1,13 @@
 use std::sync::{Arc, Mutex};
 
 use futures_util::StreamExt;
+use tokio::task::JoinHandle;
 use zbus::Connection;
 
 // ── zbus proxy ────────────────────────────────────────────────────────────────
 
 /// Client-side proxy for the daemon's DBus interface.
-/// Matches the server-side `#[interface]` in `daemon/src/dbus.rs` exactly.
+/// Matches the server-side `#[interface]` in `daemon/src/dbus.rs`.
 #[zbus::proxy(
     interface = "org.transcriber.Daemon",
     default_service = "org.transcriber.Daemon",
@@ -20,13 +21,17 @@ pub trait Daemon {
     /// Stop recording and send audio to the transcription API.
     async fn stop_recording(&self) -> zbus::Result<()>;
 
-    /// Cancel an in-progress recording without transcribing.
+    /// Cancel an in-progress recording or transcription.
     async fn cancel(&self) -> zbus::Result<()>;
 
     /// Emitted whenever the daemon state changes.
     /// Values: "Idle" | "Recording" | "Transcribing" | "PostProcessing" | "Streaming" | "Done" | "Error"
     #[zbus(signal)]
     async fn state_changed(&self, state: String) -> zbus::Result<()>;
+
+    /// Emitted right before `StateChanged("Error")` with a human-readable reason.
+    #[zbus(signal)]
+    async fn error_occurred(&self, message: String) -> zbus::Result<()>;
 
     /// Audio VU level in range 0.0–1.0, emitted ~30 Hz while recording.
     #[zbus(signal)]
@@ -43,8 +48,6 @@ pub trait Daemon {
     async fn transcription_chunk(&self, text: String) -> zbus::Result<()>;
 
     /// The daemon's current state string (same values as StateChanged signal).
-    /// Declared as a regular fn: zbus caches property values and exposes them
-    /// synchronously in proxies generated with gen_blocking = false.
     #[zbus(property)]
     fn current_state(&self) -> zbus::Result<String>;
 }
@@ -54,78 +57,133 @@ pub trait Daemon {
 #[derive(Debug, Clone)]
 pub enum DaemonEvent {
     StateChanged(String),
+    ErrorOccurred(String),
     AudioLevel(f64),
     TranscriptionReady(String),
     TranscriptionChunk(String),
 }
 
-// ── Connection helper ─────────────────────────────────────────────────────────
+// ── Connection helpers ────────────────────────────────────────────────────────
 
-/// Connect to the daemon's DBus service, seed the initial state, and spawn
-/// background tasks that forward signals to the GTK main thread via `event_tx`.
+/// Build a proxy for the daemon on the session bus.
 ///
-/// Returns the proxy so the caller can issue method calls (e.g. from the
-/// GlobalShortcuts portal activation handler).
-pub async fn connect(
-    event_tx: async_channel::Sender<DaemonEvent>,
-    current_state: Arc<Mutex<String>>,
-) -> anyhow::Result<DaemonProxy<'static>> {
-    let conn = Connection::session().await?;
-    let proxy = DaemonProxy::new(&conn).await?;
+/// Property caching is disabled: the daemon may restart underneath us, and a
+/// stale cached `CurrentState` is exactly what would desync the hotkey toggle.
+/// Every read goes to the bus instead (it's only done on (re)connect).
+pub async fn proxy(conn: &Connection) -> zbus::Result<DaemonProxy<'static>> {
+    DaemonProxy::builder(conn)
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+}
 
-    // Seed the overlay with the daemon's current state so toggle works
-    // immediately even before the first StateChanged signal fires.
-    let init = proxy.current_state().await.unwrap_or_else(|_| "Idle".to_string());
-    *current_state.lock().unwrap() = init.clone();
-    event_tx.send(DaemonEvent::StateChanged(init)).await.ok();
+/// Aborts every forwarding task when dropped, so a re-subscription (or the
+/// whole session going away) never leaves stale forwarders running.
+pub struct Subscription(Vec<JoinHandle<()>>);
 
-    // ── StateChanged stream ───────────────────────────────────────────────────
-    let tx1 = event_tx.clone();
-    let state1 = current_state.clone();
-    let mut state_stream = proxy.receive_state_changed().await?;
-    tokio::spawn(async move {
-        while let Some(signal) = state_stream.next().await {
+impl Drop for Subscription {
+    fn drop(&mut self) {
+        for h in &self.0 {
+            h.abort();
+        }
+    }
+}
+
+/// Publish a state both to the shared toggle state and to the GTK thread.
+pub async fn publish_state(
+    state: String,
+    event_tx: &async_channel::Sender<DaemonEvent>,
+    current_state: &Mutex<String>,
+) {
+    *current_state.lock().unwrap() = state.clone();
+    event_tx.send(DaemonEvent::StateChanged(state)).await.ok();
+}
+
+/// Re-read the daemon's `CurrentState` and publish it. Called after every
+/// (re)subscription so the overlay and hotkey toggle match reality.
+///
+/// Only call this while the name has an owner: reading a property of an
+/// unowned name would DBus-activate the daemon as a side effect.
+pub async fn sync_state(
+    proxy: &DaemonProxy<'static>,
+    event_tx: &async_channel::Sender<DaemonEvent>,
+    current_state: &Mutex<String>,
+) {
+    let state = match proxy.current_state().await {
+        Ok(s) => s,
+        Err(e) => {
+            tracing::warn!("could not read CurrentState: {e}");
+            "Idle".to_string()
+        }
+    };
+    publish_state(state, event_tx, current_state).await;
+}
+
+/// Subscribe to every daemon signal and spawn tasks forwarding them to the
+/// GTK main thread via `event_tx`. Dropping the returned `Subscription`
+/// stops the forwarders.
+pub async fn subscribe(
+    proxy: &DaemonProxy<'static>,
+    event_tx: &async_channel::Sender<DaemonEvent>,
+    current_state: &Arc<Mutex<String>>,
+) -> zbus::Result<Subscription> {
+    let mut handles = Vec::with_capacity(5);
+
+    // ── StateChanged ──────────────────────────────────────────────────────────
+    let tx = event_tx.clone();
+    let state = current_state.clone();
+    let mut stream = proxy.receive_state_changed().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
-                let s = args.state().to_owned();
-                *state1.lock().unwrap() = s.clone();
-                tx1.send(DaemonEvent::StateChanged(s)).await.ok();
+                publish_state(args.state().to_owned(), &tx, &state).await;
             }
         }
-        tracing::info!("StateChanged stream ended — daemon likely stopped");
-    });
+    }));
 
-    // ── AudioLevel stream ─────────────────────────────────────────────────────
-    let tx2 = event_tx.clone();
-    let mut level_stream = proxy.receive_audio_level().await?;
-    tokio::spawn(async move {
-        while let Some(signal) = level_stream.next().await {
+    // ── ErrorOccurred ─────────────────────────────────────────────────────────
+    let tx = event_tx.clone();
+    let mut stream = proxy.receive_error_occurred().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
-                tx2.send(DaemonEvent::AudioLevel(*args.level())).await.ok();
+                tx.send(DaemonEvent::ErrorOccurred(args.message().to_owned())).await.ok();
             }
         }
-    });
+    }));
 
-    // ── TranscriptionReady stream ─────────────────────────────────────────────
-    let tx3 = event_tx.clone();
-    let mut text_stream = proxy.receive_transcription_ready().await?;
-    tokio::spawn(async move {
-        while let Some(signal) = text_stream.next().await {
+    // ── AudioLevel ────────────────────────────────────────────────────────────
+    let tx = event_tx.clone();
+    let mut stream = proxy.receive_audio_level().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
-                tx3.send(DaemonEvent::TranscriptionReady(args.text().to_owned())).await.ok();
+                tx.send(DaemonEvent::AudioLevel(*args.level())).await.ok();
             }
         }
-    });
+    }));
 
-    // ── TranscriptionChunk stream (streaming providers only) ──────────────────
-    let tx4 = event_tx.clone();
-    let mut chunk_stream = proxy.receive_transcription_chunk().await?;
-    tokio::spawn(async move {
-        while let Some(signal) = chunk_stream.next().await {
+    // ── TranscriptionReady ────────────────────────────────────────────────────
+    let tx = event_tx.clone();
+    let mut stream = proxy.receive_transcription_ready().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
-                tx4.send(DaemonEvent::TranscriptionChunk(args.text().to_owned())).await.ok();
+                tx.send(DaemonEvent::TranscriptionReady(args.text().to_owned())).await.ok();
             }
         }
-    });
+    }));
 
-    Ok(proxy)
+    // ── TranscriptionChunk (streaming providers only) ─────────────────────────
+    let tx = event_tx.clone();
+    let mut stream = proxy.receive_transcription_chunk().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
+            if let Ok(args) = signal.args() {
+                tx.send(DaemonEvent::TranscriptionChunk(args.text().to_owned())).await.ok();
+            }
+        }
+    }));
+
+    Ok(Subscription(handles))
 }

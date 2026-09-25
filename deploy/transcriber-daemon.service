@@ -8,15 +8,23 @@ PartOf=graphical-session.target
 Type=dbus
 BusName=org.transcriber.Daemon
 
+# The sandbox below makes the home directory read-only apart from the two
+# ReadWritePaths, so create them (and carry over the pre-rename
+# "voice-transcriber" directories) outside the sandbox first ("+" prefix).
+ExecStartPre=+/bin/sh -c 'for d in "%h/.config" "%h/.local/share"; do if [ -d "$$d/voice-transcriber" ] && [ ! -e "$$d/transcriber" ]; then mv "$$d/voice-transcriber" "$$d/transcriber"; fi; mkdir -p "$$d/transcriber"; done'
 ExecStart=%h/.local/bin/transcriber-daemon
 Restart=on-failure
 RestartSec=3s
 
-# wl-clipboard-rs needs these to reach the Wayland compositor.
-# WAYLAND_DISPLAY is hardcoded because systemd user services don't
-# automatically inherit it even when the manager's environment has it.
 Environment=RUST_LOG=info
-Environment=WAYLAND_DISPLAY=wayland-0
+
+# Hardening. No ProtectHome=: audio goes through PipeWire/PulseAudio sockets
+# under $XDG_RUNTIME_DIR, and the config/data dirs live in $HOME.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=%h/.config/transcriber %h/.local/share/transcriber
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]
 WantedBy=graphical-session.target

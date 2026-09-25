@@ -11,21 +11,11 @@ path = "src/main.rs"
 [dependencies]
 common = { path = "../common", package = "transcriber-common" }
 
-gtk4       = { version = "0.11", features = ["blueprint"] }
+gtk4       = { version = "0.11" }
 libadwaita = { version = "0.9", features = ["v1_9"] }
 # v1_9 enables: SpinRow/ButtonRow (1.6), InlineViewSwitcher/WrapBox (1.7),
 #               ShortcutsDialog/ShortcutLabel/PreferencesGroup.bind_model (1.8),
 #               Sidebar/ViewSwitcherSidebar/WrapBox/NoneAnimationTarget (1.9)
 
-zbus       = { workspace = true }
-serde      = { workspace = true }
-serde_json = { workspace = true }
-anyhow     = { workspace = true }
-tokio      = { workspace = true }
 dirs       = { workspace = true }
 rusqlite   = { version = "0.39", features = ["bundled"] }
-
-[build-dependencies]
-# blueprint-compiler is a system binary; gtk4's build script invokes it when
-# the "blueprint" feature is enabled.
-# Install it with: sudo dnf install blueprint-compiler

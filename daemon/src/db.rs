@@ -1,5 +1,6 @@
 use anyhow::Result;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 #[derive(Debug, Clone)]
@@ -76,11 +77,14 @@ impl Database {
         Ok(())
     }
 
-    /// Update an existing entry after a successful retry.
-    pub fn update_retry_success(&self, id: i64, text: &str) -> Result<()> {
+    /// Update an existing entry after a successful retry. `text_original` has
+    /// the same meaning as in `insert` and is overwritten either way, so a
+    /// retry with post-processing off doesn't leave a stale polished/raw pair.
+    pub fn update_retry_success(&self, id: i64, text: &str, text_original: Option<&str>) -> Result<()> {
         self.conn.lock().unwrap().execute(
-            "UPDATE history SET text = ?1, status = 'ok', error = NULL WHERE id = ?2",
-            params![text, id],
+            "UPDATE history SET text = ?1, text_original = ?2, status = 'ok', error = NULL
+             WHERE id = ?3",
+            params![text, text_original, id],
         )?;
         Ok(())
     }
@@ -94,19 +98,62 @@ impl Database {
         Ok(())
     }
 
-    /// Delete a single entry by id.
+    /// The stored WAV path for an entry, if the entry exists and has one.
+    pub fn wav_path(&self, id: i64) -> Result<Option<String>> {
+        Ok(self.conn.lock().unwrap()
+            .query_row("SELECT wav_path FROM history WHERE id = ?1", params![id], |r| r.get(0))
+            .optional()?
+            .flatten())
+    }
+
+    /// Delete a single entry by id, and its WAV.
     pub fn delete_entry(&self, id: i64) -> Result<()> {
-        self.conn.lock().unwrap().execute(
-            "DELETE FROM history WHERE id = ?1",
-            params![id],
-        )?;
+        let wavs = self.delete_where("id = ?1", params![id])?;
+        remove_recordings(&wavs);
         Ok(())
     }
 
-    /// Delete all history entries.
+    /// Delete all history entries and their WAVs.
     pub fn clear_all(&self) -> Result<()> {
-        self.conn.lock().unwrap().execute("DELETE FROM history", [])?;
+        let wavs = self.delete_where("1", [])?;
+        remove_recordings(&wavs);
         Ok(())
+    }
+
+    /// Keep only the newest `keep` entries (0 = keep everything), deleting the
+    /// rest along with their WAVs. Run after every insert so the recordings
+    /// directory can't grow without bound.
+    pub fn prune(&self, keep: u32) -> Result<()> {
+        if keep == 0 {
+            return Ok(());
+        }
+        let wavs = self.delete_where(
+            "id NOT IN (SELECT id FROM history ORDER BY id DESC LIMIT ?1)",
+            params![keep],
+        )?;
+        if !wavs.is_empty() {
+            tracing::info!("history retention: removed {} old recording(s)", wavs.len());
+        }
+        remove_recordings(&wavs);
+        Ok(())
+    }
+
+    /// Delete the rows matching `filter`, returning the WAV paths they held.
+    /// Both statements run in one transaction so a concurrent insert can't
+    /// slip in between and lose its WAV to the DELETE without being listed.
+    fn delete_where(&self, filter: &str, args: impl rusqlite::Params + Clone) -> Result<Vec<String>> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn.transaction()?;
+        let wavs = {
+            let mut stmt = tx.prepare(&format!(
+                "SELECT wav_path FROM history WHERE wav_path IS NOT NULL AND ({filter})"
+            ))?;
+            let rows = stmt.query_map(args.clone(), |r| r.get::<_, String>(0))?;
+            rows.collect::<Result<Vec<_>, _>>()?
+        };
+        tx.execute(&format!("DELETE FROM history WHERE {filter}"), args)?;
+        tx.commit()?;
+        Ok(wavs)
     }
 
     /// Return the most recent `limit` entries, newest first.
@@ -128,6 +175,30 @@ impl Database {
             })
         })?;
         Ok(rows.collect::<Result<_, _>>()?)
+    }
+}
+
+/// Resolve `path` and return it only if it lies inside our own
+/// `recordings/` directory.
+///
+/// WAV paths reach us from the DB (and historically from DBus callers), so
+/// anything we read or delete is confined here: a bad row must not be able to
+/// make the daemon read or unlink an arbitrary file.
+pub fn recording_path(path: &Path) -> Option<PathBuf> {
+    let dir = common::config::data_dir().join("recordings").canonicalize().ok()?;
+    let resolved = path.canonicalize().ok()?;
+    resolved.starts_with(&dir).then_some(resolved)
+}
+
+fn remove_recordings(paths: &[String]) {
+    for p in paths {
+        let Some(resolved) = recording_path(Path::new(p)) else {
+            // Already gone, or outside recordings/ (e.g. pre-rename data dir).
+            continue;
+        };
+        if let Err(e) = std::fs::remove_file(&resolved) {
+            tracing::warn!("failed to delete recording {}: {e}", resolved.display());
+        }
     }
 }
 

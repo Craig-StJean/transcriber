@@ -1,0 +1,7 @@
+# Minimum supported Rust version: gtk4-rs 0.11 / pango 0.22 declare
+# rust-version = 1.92. Pinning the exact MSRV makes CI, release builds and
+# `nix develop` (flake.nix reads this file) use the same compiler and lints.
+[toolchain]
+channel = "1.92"
+components = ["clippy", "rustfmt"]
+profile = "minimal"

@@ -67,7 +67,7 @@ jobs:
         run: |
           echo "::notice title=Cachix disabled::No CACHIX_AUTH_TOKEN secret is set, so build outputs will not be published to the '${CACHE_NAME}' cache. The build and tests below still run. See the header of .github/workflows/nix.yml for the one-time setup."
 
-      # Builds the package and, because doCheck is on, runs the `common` crate's
+      # Builds the package and, because doCheck is on, runs the workspace's
       # unit tests as part of it. When the cachix step ran, it pushes whatever
       # lands in the store as the job finishes.
       - name: Build package

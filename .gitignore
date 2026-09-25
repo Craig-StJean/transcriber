@@ -23,3 +23,6 @@ Thumbs.db
 
 # Misc
 *.log
+
+# Compiled by the installers; GNOME Shell 44+ doesn't need it shipped
+extension/schemas/gschemas.compiled
