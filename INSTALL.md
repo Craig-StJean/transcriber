@@ -34,7 +34,6 @@ rustc --version   # should be >= 1.92
 You need an API key for a Whisper-compatible transcription service.
 
 - **Groq** (recommended — fast and free tier available): <https://console.groq.com>
-- **Cohere** (excellent WER and user preference): <https://dashboard.cohere.com>
 - **OpenAI**: <https://platform.openai.com>
 - Any self-hosted OpenAI-compatible Whisper server also works.
 

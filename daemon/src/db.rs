@@ -77,9 +77,10 @@ impl Database {
         Ok(())
     }
 
-    /// Update an existing entry after a successful retry. `text_original` has
-    /// the same meaning as in `insert` and is overwritten either way, so a
-    /// retry with post-processing off doesn't leave a stale polished/raw pair.
+    /// Update an existing entry after a successful retry or re-polish.
+    /// `text_original` has the same meaning as in `insert` and is overwritten
+    /// either way, so a retry with post-processing off doesn't leave a stale
+    /// polished/raw pair.
     pub fn update_retry_success(&self, id: i64, text: &str, text_original: Option<&str>) -> Result<()> {
         self.conn.lock().unwrap().execute(
             "UPDATE history SET text = ?1, text_original = ?2, status = 'ok', error = NULL
@@ -104,6 +105,17 @@ impl Database {
             .query_row("SELECT wav_path FROM history WHERE id = ?1", params![id], |r| r.get(0))
             .optional()?
             .flatten())
+    }
+
+    /// An entry's `(text, text_original)`, or None if there is no such entry.
+    pub fn texts(&self, id: i64) -> Result<Option<(String, Option<String>)>> {
+        Ok(self.conn.lock().unwrap()
+            .query_row(
+                "SELECT text, text_original FROM history WHERE id = ?1",
+                params![id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .optional()?)
     }
 
     /// Delete a single entry by id, and its WAV.

@@ -8,10 +8,12 @@ PartOf=graphical-session.target
 Type=dbus
 BusName=org.transcriber.Daemon
 
-# The sandbox below makes the home directory read-only apart from the two
-# ReadWritePaths, so create them (and carry over the pre-rename
-# "voice-transcriber" directories) outside the sandbox first ("+" prefix).
-ExecStartPre=+/bin/sh -c 'for d in "%h/.config" "%h/.local/share"; do if [ -d "$$d/voice-transcriber" ] && [ ! -e "$$d/transcriber" ]; then mv "$$d/voice-transcriber" "$$d/transcriber"; fi; mkdir -p "$$d/transcriber"; done'
+# The sandbox below makes the home directory read-only apart from the
+# ReadWritePaths, so create the config/data dirs (and carry over the
+# pre-rename "voice-transcriber" directories) outside the sandbox first ("+"
+# prefix). %E is $XDG_CONFIG_HOME (default ~/.config); data follows
+# $XDG_DATA_HOME if the user manager has it set.
+ExecStartPre=+/bin/sh -c 'for d in "%E" "$${XDG_DATA_HOME:-%h/.local/share}"; do if [ -d "$$d/voice-transcriber" ] && [ ! -e "$$d/transcriber" ]; then mv "$$d/voice-transcriber" "$$d/transcriber"; fi; mkdir -p "$$d/transcriber"; done'
 ExecStart=%h/.local/bin/transcriber-daemon
 Restart=on-failure
 RestartSec=3s
@@ -23,7 +25,10 @@ Environment=RUST_LOG=info
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
-ReadWritePaths=%h/.config/transcriber %h/.local/share/transcriber
+# systemd has no specifier for $XDG_DATA_HOME: a custom data dir needs a
+# drop-in adding it here. "-" keeps a missing default data dir from failing
+# the unit when XDG_DATA_HOME points elsewhere.
+ReadWritePaths=%E/transcriber -%h/.local/share/transcriber
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 
 [Install]

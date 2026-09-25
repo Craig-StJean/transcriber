@@ -9,10 +9,6 @@
 //!   decides how the extension presents the result. `config.json` is the
 //!   authority (the daemon reads it, and NixOS may declare it there); the
 //!   GSettings key follows.
-//! - Vocabulary is only useless with Cohere *and* post-processing off, so the
-//!   post-processing switch has to re-evaluate that group too.
-
-use std::rc::Rc;
 
 use gtk4::gio;
 use libadwaita as adw;
@@ -54,7 +50,6 @@ pub struct Coupled {
     pub streaming_expander: adw::ExpanderRow,
     pub postprocess_switch: adw::SwitchRow,
     pub direct_inject_row:  adw::SwitchRow,
-    pub sync_vocab:         Rc<dyn Fn()>,
 }
 
 pub fn connect(
@@ -63,7 +58,7 @@ pub fn connect(
     ext: &Option<gio::Settings>,
     toast: &adw::ToastOverlay,
 ) {
-    let Coupled { streaming_expander, postprocess_switch, direct_inject_row, sync_vocab } = w;
+    let Coupled { streaming_expander, postprocess_switch, direct_inject_row } = w;
 
     let set_ext_direct = {
         let ext = ext.clone();
@@ -117,7 +112,6 @@ pub fn connect(
                 streaming_expander.set_enable_expansion(false);
                 ui::toast(&toast, "Streaming turned off — it can't be combined with post-processing");
             }
-            sync_vocab();
         }
     });
 

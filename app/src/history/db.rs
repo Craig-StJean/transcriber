@@ -11,6 +11,12 @@ use rusqlite::{Connection, OpenFlags};
 /// matches the daemon's default retention.
 const LOAD_LIMIT: i64 = 500;
 
+/// Cap on search results. A search is for finding one entry; past this the
+/// query is too broad to scan by eye anyway.
+const SEARCH_LIMIT: i64 = 200;
+
+const COLUMNS: &str = "id, timestamp, text, status, error, wav_path, text_original";
+
 #[derive(Clone, PartialEq, Eq)]
 pub struct HistoryEntry {
     pub id:            i64,
@@ -27,14 +33,32 @@ impl HistoryEntry {
         self.status == "failed"
     }
 
-    /// Case-insensitive match against everything the row can display.
-    /// `needle` must already be lowercase.
-    pub fn matches(&self, needle: &str) -> bool {
-        needle.is_empty()
-            || self.text.to_lowercase().contains(needle)
-            || self.text_original.as_deref().is_some_and(|t| t.to_lowercase().contains(needle))
-            || self.error.as_deref().is_some_and(|t| t.to_lowercase().contains(needle))
+    fn from_row(row: &rusqlite::Row) -> rusqlite::Result<Self> {
+        Ok(HistoryEntry {
+            id:            row.get(0)?,
+            timestamp:     row.get(1)?,
+            text:          row.get(2)?,
+            status:        row.get(3)?,
+            error:         row.get(4)?,
+            wav_path:      row.get(5)?,
+            text_original: row.get(6)?,
+        })
     }
+}
+
+fn db_path() -> Option<std::path::PathBuf> {
+    let path = config::data_dir().join("history.db");
+    // Don't create it: an empty file here would be a database with no
+    // schema, which the daemon would then have to cope with.
+    path.exists().then_some(path)
+}
+
+fn open_read_only(path: &std::path::Path) -> Option<Connection> {
+    Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .ok()
 }
 
 #[derive(Default)]
@@ -46,17 +70,7 @@ pub struct HistoryDb {
 impl HistoryDb {
     fn conn(&mut self) -> Option<&Connection> {
         if self.conn.is_none() {
-            let path = config::data_dir().join("history.db");
-            // Don't create it: an empty file here would be a database with
-            // no schema, which the daemon would then have to cope with.
-            if !path.exists() {
-                return None;
-            }
-            self.conn = Connection::open_with_flags(
-                &path,
-                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-            )
-            .ok();
+            self.conn = open_read_only(&db_path()?);
         }
         self.conn.as_ref()
     }
@@ -79,26 +93,48 @@ impl HistoryDb {
     /// Newest first.
     pub fn load(&mut self) -> Vec<HistoryEntry> {
         let Some(conn) = self.conn() else { return vec![] };
-        let Ok(mut stmt) = conn.prepare_cached(
-            "SELECT id, timestamp, text, status, error, wav_path, text_original
-             FROM history ORDER BY id DESC LIMIT ?1",
-        ) else {
+        let Ok(mut stmt) = conn.prepare_cached(&format!(
+            "SELECT {COLUMNS} FROM history ORDER BY id DESC LIMIT ?1"
+        )) else {
             return vec![];
         };
-        stmt.query_map([LOAD_LIMIT], |row| {
-            Ok(HistoryEntry {
-                id:            row.get(0)?,
-                timestamp:     row.get(1)?,
-                text:          row.get(2)?,
-                status:        row.get(3)?,
-                error:         row.get(4)?,
-                wav_path:      row.get(5)?,
-                text_original: row.get(6)?,
-            })
-        })
+        stmt.query_map([LOAD_LIMIT], HistoryEntry::from_row)
+            .map(|rows| rows.flatten().collect())
+            .unwrap_or_default()
+    }
+}
+
+/// Entries whose text, original text or error contains `query`, newest
+/// first. Searches the whole table, not just the rows `load` returns.
+/// Opens its own connection so it can run on a worker thread; call it off
+/// the main thread. Case-insensitive for ASCII only (SQLite's `LIKE`).
+pub fn search(query: &str) -> Vec<HistoryEntry> {
+    let Some(conn) = db_path().as_deref().and_then(open_read_only) else { return vec![] };
+    let pattern = format!("%{}%", escape_like(query));
+    let Ok(mut stmt) = conn.prepare(&format!(
+        "SELECT {COLUMNS} FROM history
+         WHERE text LIKE ?1 ESCAPE '\\'
+            OR text_original LIKE ?1 ESCAPE '\\'
+            OR error LIKE ?1 ESCAPE '\\'
+         ORDER BY id DESC LIMIT ?2"
+    )) else {
+        return vec![];
+    };
+    stmt.query_map(rusqlite::params![pattern, SEARCH_LIMIT], HistoryEntry::from_row)
         .map(|rows| rows.flatten().collect())
         .unwrap_or_default()
+}
+
+/// Make `%`, `_` and the escape character itself match literally.
+fn escape_like(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        if matches!(c, '%' | '_' | '\\') {
+            out.push('\\');
+        }
+        out.push(c);
     }
+    out
 }
 
 /// Length of a PCM WAV from its header. Does file I/O — call off the main
@@ -120,4 +156,15 @@ pub fn wav_duration_secs(path: &str) -> Option<f64> {
     }
     let bytes_per_second = sample_rate * channels * (bits_per_sample / 8);
     Some(data_size as f64 / bytes_per_second as f64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::escape_like;
+
+    #[test]
+    fn like_wildcards_match_literally() {
+        assert_eq!(escape_like("100%_done\\"), "100\\%\\_done\\\\");
+        assert_eq!(escape_like("plain"), "plain");
+    }
 }

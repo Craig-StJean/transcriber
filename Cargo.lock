@@ -2906,6 +2906,7 @@ dependencies = [
  "gtk4",
  "libadwaita",
  "rusqlite",
+ "serde_json",
  "transcriber-common",
 ]
 

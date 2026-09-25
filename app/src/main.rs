@@ -45,6 +45,10 @@ fn build_shortcuts_dialog(ext: &Option<gio::Settings>) -> adw::ShortcutsDialog {
         "Cancel Recording",
         &ext_settings::accel(ext, "cancel-recording", "Escape"),
     ));
+    if let Some(accel) = ext_settings::optional_accel(ext, "repaste-last") {
+        // An empty accelerator means unbound; see `label_unbound` below.
+        recording.add(adw::ShortcutsItem::new("Re-paste Last Transcription", &accel.unwrap_or_default()));
+    }
     dialog.add(recording);
 
     let app_section = adw::ShortcutsSection::new(Some("Application"));
@@ -57,7 +61,22 @@ fn build_shortcuts_dialog(ext: &Option<gio::Settings>) -> adw::ShortcutsDialog {
     app_section.add(adw::ShortcutsItem::new("Quit", "<Control>q"));
     dialog.add(app_section);
 
+    // Unbound shortcuts would read "No Shortcut"; say "Disabled" instead.
+    // `ShortcutsItem` doesn't expose its label, so find it once built.
+    dialog.connect_map(|d| label_unbound(d.upcast_ref()));
     dialog
+}
+
+fn label_unbound(w: &gtk4::Widget) {
+    if let Some(label) = w.downcast_ref::<adw::ShortcutLabel>() {
+        label.set_disabled_text("Disabled");
+        return;
+    }
+    let mut child = w.first_child();
+    while let Some(c) = child {
+        label_unbound(&c);
+        child = c.next_sibling();
+    }
 }
 
 fn build_ui(app: &adw::Application) {
@@ -104,7 +123,6 @@ fn build_ui(app: &adw::Application) {
             streaming_expander: settings.streaming_expander,
             postprocess_switch,
             direct_inject_row:  settings.direct_inject_row,
-            sync_vocab:         settings.sync_vocab,
         },
         &saver,
         &ext_settings,
@@ -123,9 +141,10 @@ fn build_ui(app: &adw::Application) {
         "document-open-recent-symbolic",
     );
 
-    let (status_page, status_refresh) = status::build(&toast_overlay, &view_stack);
+    let status = status::build(&toast_overlay, &view_stack);
+    let status_refresh = status.refresh;
     view_stack.add_titled_with_icon(
-        &status_page,
+        &status.page,
         Some("status"),
         "Status",
         "emblem-system-symbolic",
@@ -204,6 +223,10 @@ fn build_ui(app: &adw::Application) {
             history.commit_pending_now();
             glib::Propagation::Proceed
         }
+    });
+    window.connect_destroy({
+        let last_error = status.last_error;
+        move |_| last_error.disconnect()
     });
     app.connect_shutdown({
         let saver = saver.clone();

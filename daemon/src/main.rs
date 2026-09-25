@@ -1,6 +1,7 @@
 mod api;
 mod audio;
 mod audio_cues;
+mod connections;
 mod db;
 mod dbus;
 mod streaming;

@@ -47,3 +47,14 @@ pub fn recording_hotkey_label(ext: &Option<gio::Settings>) -> Option<String> {
     let (key, mods) = gtk4::accelerator_parse(&accel)?;
     Some(gtk4::accelerator_get_label(key, mods).to_string())
 }
+
+/// Accelerator for a key that is unbound by default. `None` when the installed
+/// extension's schema predates the key — reading it would abort the process —
+/// so there is nothing to show; `Some(None)` when it is unbound.
+pub fn optional_accel(ext: &Option<gio::Settings>, key: &str) -> Option<Option<String>> {
+    let Some(s) = ext else { return Some(None) };
+    if !s.settings_schema().is_some_and(|schema| schema.has_key(key)) {
+        return None;
+    }
+    Some(s.strv(key).first().map(|g| g.to_string()).filter(|a| !a.is_empty()))
+}

@@ -85,8 +85,10 @@ export default class TranscriberExtension extends Extension {
         this._nameOwner         = null;
         this._daemonState       = 'Idle';
         this._starting          = false;   // StartRecording in flight (maybe activating daemon)
-        this._lastChunkText     = '';
-        this._streamed          = false;
+        this._streamTyped       = '';      // text typed via chunks this session
+        this._typedViaChunks    = false;
+        this._streamMismatch    = false;   // final text didn't extend the typed chunks
+        this._discardReason     = null;    // SessionDiscarded reason, consumed on Idle
         this._lastTranscription = '';
         this._lastError         = null;
         this._cancelled         = false;
@@ -119,7 +121,7 @@ export default class TranscriberExtension extends Extension {
         this._settings          = null;
         this._nameOwner         = null;
         this._daemonState       = 'Idle';
-        this._lastChunkText     = '';
+        this._streamTyped       = '';
         this._lastTranscription = '';
         this._lastError         = null;
     }
@@ -173,7 +175,10 @@ export default class TranscriberExtension extends Extension {
         this._setCancelBinding(false);
         this._pttAwaitingStart = false;
         this._pttStopPending   = false;
-        this._lastChunkText    = '';
+        this._streamTyped      = '';
+        this._typedViaChunks   = false;
+        this._streamMismatch   = false;
+        this._discardReason    = null;
         this._lastError        = null;
         this._cancelled        = false;
     }
@@ -226,6 +231,11 @@ export default class TranscriberExtension extends Extension {
             sub('ErrorOccurred', p => {
                 this._lastError = p.get_child_value(0).get_string()[0];
             }),
+            // Emitted right before StateChanged("Idle") when a session ends
+            // without text; the Idle handler shows the matching message.
+            sub('SessionDiscarded', p => {
+                this._discardReason = p.get_child_value(0).get_string()[0];
+            }),
             sub('TranscriptionReady', p =>
                 this._onTranscriptionReady(p.get_child_value(0).get_string()[0])),
             sub('TranscriptionChunk', p =>
@@ -244,12 +254,19 @@ export default class TranscriberExtension extends Extension {
         console.log(`Transcriber: TranscriptionReady (${text.length} chars)`);
         if (text) this._lastTranscription = text;
 
-        if (this._lastChunkText) {
-            // Streaming mode: type any remaining delta vs what was already typed
-            const delta = text.slice(this._lastChunkText.length);
-            if (delta) this._directInject(delta);
-            this._streamed = true;
-            this._lastChunkText = '';
+        if (this._typedViaChunks) {
+            // Streaming: the chunks already typed a prefix. Type only what
+            // extends it; never retype text that's already in the window.
+            if (text.startsWith(this._streamTyped)) {
+                const rest = text.slice(this._streamTyped.length);
+                if (rest) this._directInject(rest);
+                this._streamTyped = text;
+            } else {
+                console.warn(`Transcriber: final text (${text.length} chars) does not extend ` +
+                    `the ${this._streamTyped.length} chars already typed — copying instead`);
+                St.Clipboard.get_default().set_text(St.ClipboardType.CLIPBOARD, text);
+                this._streamMismatch = true;
+            }
         } else if (this._settings.get_boolean('direct-injection')) {
             this._directInject(text);
         } else {
@@ -261,12 +278,19 @@ export default class TranscriberExtension extends Extension {
 
     _onTranscriptionChunk(text) {
         if (this._cancelled) return;
-        // Each chunk is a new finalized phrase; inject the delta since the last chunk.
-        const delta = text.slice(this._lastChunkText.length);
-        if (delta) {
-            this._directInject(delta);
-            this._lastChunkText = text;
+        // Chunks after the session has ended (cancel, Done) are stale.
+        if (this._daemonState !== 'Recording' && this._daemonState !== 'Streaming') return;
+        // Chunks are cumulative: type only the suffix beyond what was typed.
+        if (!text.startsWith(this._streamTyped)) {
+            console.warn(`Transcriber: stream chunk (${text.length} chars) does not extend ` +
+                `the ${this._streamTyped.length} chars already typed — not typing it`);
+            return;
         }
+        const delta = text.slice(this._streamTyped.length);
+        if (!delta) return;
+        this._directInject(delta);
+        this._streamTyped    = text;
+        this._typedViaChunks = true;
     }
 
     _onStateChanged(state) {
@@ -290,10 +314,12 @@ export default class TranscriberExtension extends Extension {
 
         switch (state) {
         case 'Recording':
-            this._cancelled     = false;
-            this._lastChunkText = '';
-            this._lastError     = null;
-            this._streamed      = false;
+            this._cancelled      = false;
+            this._streamTyped    = '';
+            this._typedViaChunks = false;
+            this._streamMismatch = false;
+            this._discardReason  = null;
+            this._lastError      = null;
             this._overlay.show();
             if (this._pttAwaitingStart) {
                 this._pttAwaitingStart = false;
@@ -319,17 +345,19 @@ export default class TranscriberExtension extends Extension {
                 this._flash('Cancelled', 700);
                 break;
             }
+            if (this._streamMismatch) {
+                this._flash('Copied (stream mismatch)', 1500);
+                break;
+            }
             const typed = this._settings.get_boolean('direct-injection') ||
-                this._lastChunkText !== '' || this._streamed;
+                this._typedViaChunks;
             const label = typed ? '✓ Typed!'
                 : this._settings.get_boolean('auto-paste') ? '✓ Pasted!'
                 : '✓ Copied!';
-            this._lastChunkText = '';
             this._flash(label, 800);
             break;
         }
         case 'Error':
-            this._lastChunkText = '';
             if (this._cancelled) {
                 this._flash('Cancelled', 700);
             } else {
@@ -337,17 +365,22 @@ export default class TranscriberExtension extends Extension {
             }
             this._lastError = null;
             break;
-        case 'Idle':
-            this._lastChunkText = '';
-            if (this._cancelled) {
+        case 'Idle': {
+            // Only the daemon's SessionDiscarded says why a session ended
+            // without text; any other Idle (e.g. a daemon restart) just hides.
+            const reason = this._discardReason;
+            this._discardReason = null;
+            if (reason === 'cancelled') {
                 this._flash('Cancelled', 700);
-            } else if (prev === 'Transcribing' || prev === 'PostProcessing') {
-                // Empty recording: daemon found no speech and returned to Idle.
+            } else if (reason === 'no-speech') {
                 this._flash('No speech detected', 1200);
             } else {
+                if (reason !== null)
+                    console.warn(`Transcriber: unknown SessionDiscarded reason "${reason}"`);
                 this._overlay.fadeOut();
             }
             break;
+        }
         }
     }
 
@@ -443,7 +476,6 @@ export default class TranscriberExtension extends Extension {
     _cancelRecording() {
         if (!ACTIVE_STATES.has(this._daemonState)) return;
         this._cancelled     = true;
-        this._lastChunkText = '';
         this._stopPttWatch();
         this._pttAwaitingStart = false;
         this._pttStopPending   = false;

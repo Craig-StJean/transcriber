@@ -5,6 +5,15 @@ let
   cfg = config.programs.transcriber;
   system = pkgs.stdenv.hostPlatform.system;
 
+  # Where the daemon keeps its files. Passed to the units explicitly so the
+  # daemon's paths and its sandbox's ReadWritePaths can't disagree.
+  configDir = "${config.xdg.configHome}/transcriber";
+  dataDir = "${config.xdg.dataHome}/transcriber";
+  xdgEnvironment = [
+    "XDG_CONFIG_HOME=${config.xdg.configHome}"
+    "XDG_DATA_HOME=${config.xdg.dataHome}"
+  ];
+
   # DBus activation file content. Exec= is required by the spec but ignored
   # when SystemdService= is set, so we point at coreutils' `true` so the path
   # is valid on NixOS (where /bin/false does not exist).
@@ -20,7 +29,7 @@ let
   # "voice-transcriber" dirs — outside the sandbox ("+" prefix) before start.
   prepareDirs = pkgs.writeShellScript "transcriber-prepare-dirs" ''
     set -eu
-    for d in "$HOME/.config" "$HOME/.local/share"; do
+    for d in ${lib.escapeShellArg config.xdg.configHome} ${lib.escapeShellArg config.xdg.dataHome}; do
       if [ -d "$d/voice-transcriber" ] && [ ! -e "$d/transcriber" ]; then
         ${pkgs.coreutils}/bin/mv "$d/voice-transcriber" "$d/transcriber"
       fi
@@ -117,7 +126,7 @@ in {
         }
       '';
       description = ''
-        Fields to merge into ~/.config/transcriber/config.json on every
+        Fields to merge into `''${xdg.configHome}/transcriber/config.json` on every
         home-manager switch. The merge is recursive and the declared values
         win; every field you don't declare keeps whatever is on disk, so
         settings changed in the GUI survive unless they are declared here.
@@ -160,14 +169,14 @@ in {
         ExecStart = "${cfg.package}/bin/transcriber-daemon";
         Restart = "on-failure";
         RestartSec = 3;
-        Environment = [ "RUST_LOG=info" ];
+        Environment = [ "RUST_LOG=info" ] ++ xdgEnvironment;
 
         # Hardening. No ProtectHome: audio goes through PipeWire/PulseAudio
         # sockets under $XDG_RUNTIME_DIR, and the config/data dirs are in $HOME.
         NoNewPrivileges = true;
         PrivateTmp = true;
         ProtectSystem = "strict";
-        ReadWritePaths = [ "%h/.config/transcriber" "%h/.local/share/transcriber" ];
+        ReadWritePaths = [ configDir dataDir ];
         RestrictAddressFamilies = "AF_UNIX AF_INET AF_INET6 AF_NETLINK";
       };
       Install = lib.mkIf cfg.autostart {
@@ -189,7 +198,8 @@ in {
         # Exits 0 without wlr-layer-shell, so this can't restart-loop on GNOME.
         Restart = "on-failure";
         RestartSec = 3;
-        Environment = [ "RUST_LOG=info" ];
+        # XDG dirs as for the daemon: the overlay reads config.json too.
+        Environment = [ "RUST_LOG=info" ] ++ xdgEnvironment;
         # Kept minimal: needs the Wayland socket, the session bus and the
         # virtual-keyboard protocol for direct text injection.
         NoNewPrivileges = true;
@@ -221,7 +231,7 @@ in {
     # settings GUI can keep saving to it. See the `config` option.
     home.activation.transcriberConfig = lib.mkIf (cfg.config != null)
       (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
-        run ${mergeConfig} ${lib.escapeShellArg "${config.xdg.configHome}/transcriber"}
+        run ${mergeConfig} ${lib.escapeShellArg configDir}
       '');
   };
 }

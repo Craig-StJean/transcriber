@@ -6,6 +6,8 @@ use libadwaita as adw;
 use adw::prelude::*;
 
 use super::checks::{active_checks, CheckResult, FixAction, StatusCheck};
+use super::connections::Connections;
+use super::last_error::LastError;
 use crate::ui;
 
 /// One check's widgets.
@@ -61,11 +63,15 @@ impl CheckRow {
     }
 }
 
-/// Returns the page and a function that re-runs every check.
-pub fn build(
-    toast: &adw::ToastOverlay,
-    view_stack: &adw::ViewStack,
-) -> (adw::PreferencesPage, Rc<dyn Fn()>) {
+pub struct StatusPage {
+    pub page:       adw::PreferencesPage,
+    /// Re-runs every check, connection tests included. Call when the page
+    /// is shown.
+    pub refresh:    Rc<dyn Fn()>,
+    pub last_error: Rc<LastError>,
+}
+
+pub fn build(toast: &adw::ToastOverlay, view_stack: &adw::ViewStack) -> StatusPage {
     let page = adw::PreferencesPage::new();
     let group = adw::PreferencesGroup::builder()
         .title("Setup")
@@ -109,13 +115,31 @@ pub fn build(
         rows.push(cr);
     }
 
+    let connections = Connections::new();
+
+    let activity_group = adw::PreferencesGroup::builder().title("Activity").build();
+    let last_error = LastError::new();
+    activity_group.add(&last_error.row);
+
     let recheck_group = adw::PreferencesGroup::new();
     let recheck = adw::ButtonRow::builder()
         .title("Recheck All")
         .start_icon_name("view-refresh-symbolic")
         .build();
 
-    let refresh_all: Rc<dyn Fn()> = Rc::new(move || rows.iter().for_each(CheckRow::run));
+    let run_checks = move || rows.iter().for_each(CheckRow::run);
+    // The local checks are cheap and run at startup too; the connection
+    // tests make real requests, so they wait for the page to be shown.
+    run_checks();
+    let refresh_all: Rc<dyn Fn()> = Rc::new({
+        let connections = Rc::clone(&connections);
+        let last_error = Rc::clone(&last_error);
+        move || {
+            run_checks();
+            connections.run();
+            last_error.update();
+        }
+    });
     recheck.connect_activated({
         let r = Rc::clone(&refresh_all);
         move |_| r()
@@ -123,9 +147,10 @@ pub fn build(
     recheck_group.add(&recheck);
 
     page.add(&group);
+    page.add(&connections.group);
+    page.add(&activity_group);
     page.add(&recheck_group);
-    refresh_all();
-    (page, refresh_all)
+    StatusPage { page, refresh: refresh_all, last_error }
 }
 
 fn connect_fix(cr: &CheckRow, toast: &adw::ToastOverlay, view_stack: &adw::ViewStack) {

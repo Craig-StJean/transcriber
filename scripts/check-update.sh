@@ -11,8 +11,8 @@
 set -euo pipefail
 
 REPO="Craig-StJean/transcriber"
-DATA_DIR="$HOME/.local/share/transcriber"
-CONFIG_DIR="$HOME/.config/transcriber"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/transcriber"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/transcriber"
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"

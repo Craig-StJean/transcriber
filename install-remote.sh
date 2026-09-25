@@ -9,9 +9,9 @@
 #   # With a GitHub token (not stored):
 #   GITHUB_TOKEN=github_pat_xxx bash install-remote.sh
 #
-# Auto-updates use either ~/.config/transcriber/github-token (a fine-grained,
-# read-only token — written only when you paste one at the prompt below) or
-# `gh auth token` at run time. The gh token itself is never written to disk.
+# Auto-updates use either ${XDG_CONFIG_HOME:-~/.config}/transcriber/github-token
+# (a fine-grained, read-only token — written only when you paste one at the
+# prompt below) or `gh auth token` at run time. The gh token itself is never written to disk.
 #
 #   # Install a specific version:
 #   VERSION=v0.2.0 bash install-remote.sh
@@ -24,8 +24,8 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
 EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
-DATA_DIR="$HOME/.local/share/transcriber"
-CONFIG_DIR="$HOME/.config/transcriber"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/transcriber"
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/transcriber"
 
 bold="\033[1m"
 dim="\033[2m"
