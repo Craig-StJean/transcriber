@@ -686,7 +686,7 @@ async fn run_batch_pipeline(
             cfg.active_postprocess_url(),
             cfg.active_postprocess_key(),
             cfg.active_postprocess_model(),
-            &cfg.postprocess_prompt,
+            &cfg.active_postprocess_system_prompt(),
             &raw,
         )
         .await

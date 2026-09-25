@@ -338,6 +338,46 @@ impl AppConfig {
         }
     }
 
+    /// System prompt for the post-processing pass: the user's
+    /// `postprocess_prompt`, plus the vocabulary as a canonical-spelling list.
+    ///
+    /// Without this the polish LLM undoes Whisper's work — it sees "AccuDose",
+    /// doesn't recognise it, and "corrects" it to "Accudose" or "accurate dose".
+    /// Worse, "Safehous" looks like a typo, so the LLM reliably adds the "e".
+    ///
+    /// Unlike `active_prompt()`, this is a real instruction to an instruction-
+    /// following model, so it can say *how* to use the terms: fix near-misses
+    /// and split/merged forms, keep the exact casing, and never insert a term
+    /// that wasn't spoken. It also isn't subject to Whisper's 224-token cap or
+    /// the Cohere exclusion — the whole list is sent regardless of which
+    /// transcription provider produced the text.
+    pub fn active_postprocess_system_prompt(&self) -> String {
+        let terms: Vec<&str> = if self.vocabulary_enabled {
+            self.vocabulary.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect()
+        } else {
+            Vec::new()
+        };
+
+        if terms.is_empty() {
+            return self.postprocess_prompt.clone();
+        }
+
+        let list: String = terms.iter().map(|t| format!("* {t}\n")).collect();
+        format!(
+            "{}\n\n\
+             **Vocabulary:** The speaker uses the terms below. They are the \
+             authoritative spellings, even where one looks like a typo or an \
+             unusual capitalisation. When the transcript contains a misspelling, \
+             phonetic near-match, or split/merged form of one of these terms \
+             (e.g. extra spaces, wrong casing, a similar-sounding common word), \
+             replace it with the exact form listed here. Do not insert a term \
+             the speaker did not say, and do not alter words that are not \
+             plausibly one of these terms.\n\n{}",
+            self.postprocess_prompt.trim_end(),
+            list.trim_end(),
+        )
+    }
+
     /// Model name for the active post-processing provider.
     pub fn active_postprocess_model(&self) -> &str {
         match self.postprocess_provider.as_str() {
@@ -492,6 +532,33 @@ mod tests {
     fn an_empty_list_sends_nothing_rather_than_an_empty_string() {
         assert_eq!(cfg_with(&[]).active_prompt(), None);
         assert_eq!(cfg_with(&["", "  "]).active_prompt(), None);
+    }
+
+    #[test]
+    fn postprocess_prompt_lists_the_vocabulary() {
+        let cfg = cfg_with(&["  AccuDose ", "", "Safehous"]);
+        let prompt = cfg.active_postprocess_system_prompt();
+        assert!(prompt.starts_with(cfg.postprocess_prompt.trim_end()));
+        assert!(prompt.ends_with("* AccuDose\n* Safehous"));
+    }
+
+    #[test]
+    fn postprocess_prompt_is_untouched_without_vocabulary() {
+        let mut cfg = AppConfig::default();
+        cfg.vocabulary_enabled = false;
+        assert_eq!(cfg.active_postprocess_system_prompt(), cfg.postprocess_prompt);
+        assert_eq!(cfg_with(&["", " "]).active_postprocess_system_prompt(), DEFAULT_POSTPROCESS_PROMPT);
+    }
+
+    #[test]
+    fn postprocess_prompt_keeps_vocabulary_for_cohere_and_past_whisper_cap() {
+        let mut cfg = cfg_with(&["Kubernetes"]);
+        cfg.provider = "cohere".into();
+        assert!(cfg.active_postprocess_system_prompt().contains("* Kubernetes"));
+
+        let terms: Vec<String> = (0..200).map(|i| format!("Term{i}")).collect();
+        let cfg = AppConfig { vocabulary: terms, ..AppConfig::default() };
+        assert!(cfg.active_postprocess_system_prompt().contains("* Term199"));
     }
 
     #[test]
