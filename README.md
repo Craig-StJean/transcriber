@@ -64,6 +64,11 @@ Notes:
   `prompt` field, so the hint is withheld there rather than risk a 400 on every
   request. The Settings group greys out when Cohere is selected. Custom endpoints
   do get it.
+- When post-processing is on, the same list is appended to the LLM's system
+  prompt as the authoritative spellings, so the polish pass fixes near-misses
+  ("accu dose" → "AccuDose") instead of "correcting" unusual terms away. This
+  uses the full list (no 224-token cap) and applies with every provider,
+  Cohere included.
 - Streaming providers (Deepgram, AssemblyAI) have their own keyword-boost
   mechanisms and are not wired to this list.
 
@@ -141,7 +146,7 @@ instead of compiling Rust and GTK4:
 ```nix
 nix.settings = {
   substituters       = [ "https://craig-transcriber.cachix.org" ];
-  trusted-public-keys = [ "craig-transcriber.cachix.org-1:<key>" ];
+  trusted-public-keys = [ "craig-transcriber.cachix.org-1:SlvEMrhwNZkhI7rc3Kq8Z6+QcF5DDOJgK4kZwQKkFiM=" ];
 };
 ```
 
