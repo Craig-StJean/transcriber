@@ -1,6 +1,5 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::time::Duration;
 
 use gtk4::{gio, glib};
 use libadwaita as adw;
@@ -31,7 +30,7 @@ impl RowHandle {
     pub fn refresh_subtitle(&self) {
         self.row.set_subtitle(&format!(
             "{}{}",
-            format_timestamp(self.entry.timestamp),
+            ui::format_timestamp(self.entry.timestamp),
             self.duration.borrow()
         ));
     }
@@ -85,6 +84,7 @@ pub fn build(entry: HistoryEntry, ctx: &RowCtx) -> RowHandle {
             move |_| ui::copy_to_clipboard(&toast, &displayed.borrow())
         });
         row.add_suffix(&copy_btn);
+        add_repolish_button(&row, entry.id, ctx);
     }
 
     if failed && entry.wav_path.is_some() {
@@ -194,6 +194,45 @@ fn add_retry_button(row: &adw::ActionRow, entry: &HistoryEntry, ctx: &RowCtx) {
     });
 }
 
+/// Runs the post-processing pass again on this entry — useful after
+/// changing the prompt or vocabulary. The daemon polishes from the original
+/// transcript when there is one, so repeated runs don't compound.
+fn add_repolish_button(row: &adw::ActionRow, id: i64, ctx: &RowCtx) {
+    let spinner = adw::Spinner::builder()
+        .visible(false)
+        .valign(gtk4::Align::Center)
+        .build();
+    let btn = gtk4::Button::builder()
+        .icon_name("tools-check-spelling-symbolic")
+        .valign(gtk4::Align::Center)
+        .css_classes(vec!["flat"])
+        .tooltip_text("Run post-processing again")
+        .build();
+    btn.update_property(&[gtk4::accessible::Property::Label("Re-polish")]);
+    row.add_suffix(&spinner);
+    row.add_suffix(&btn);
+
+    let ctx = ctx.clone();
+    btn.connect_clicked(move |btn| {
+        btn.set_visible(false);
+        spinner.set_visible(true);
+        let btn = btn.clone();
+        let spinner = spinner.clone();
+        let ctx = ctx.clone();
+        glib::spawn_future_local(async move {
+            let result = daemon::call("RepolishEntry", Some((id,).to_variant()), daemon::REPOLISH_TIMEOUT_MS).await;
+            spinner.set_visible(false);
+            btn.set_visible(true);
+            if let Err(e) = result {
+                ui::toast(&ctx.toast, &format!("Couldn't re-polish: {}", daemon::error_message(&e)));
+            }
+            // The row is rebuilt from the database if its text changed; don't
+            // wait for the next data_version poll to show it.
+            (ctx.refresh)();
+        });
+    });
+}
+
 fn add_play_button(row: &adw::ActionRow, wav_path: &str) {
     let play_btn = gtk4::Button::builder()
         .icon_name("media-playback-start-symbolic")
@@ -255,22 +294,5 @@ pub fn format_duration(secs: f64) -> String {
     } else {
         let secs = secs as u64;
         format!("{}m {:02}s", secs / 60, secs % 60)
-    }
-}
-
-pub fn format_timestamp(ts: i64) -> String {
-    if ts == 0 {
-        return String::new();
-    }
-    let elapsed = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH + Duration::from_secs(ts as u64))
-        .unwrap_or_default()
-        .as_secs();
-    let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
-    match elapsed {
-        0..=59       => "just now".into(),
-        60..=3599    => format!("{} min ago", elapsed / 60),
-        3600..=86399 => format!("{} hr ago", elapsed / 3600),
-        s            => plural(s / 86400, "day"),
     }
 }

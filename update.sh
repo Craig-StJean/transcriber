@@ -9,7 +9,7 @@ SYSTEMD_DIR="$HOME/.config/systemd/user"
 DBUS_SERVICES_DIR="$HOME/.local/share/dbus-1/services"
 APPLICATIONS_DIR="$HOME/.local/share/applications"
 EXT_DIR="$HOME/.local/share/gnome-shell/extensions/transcriber@local"
-DATA_DIR="$HOME/.local/share/transcriber"
+DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/transcriber"
 
 bold="\033[1m"
 dim="\033[2m"

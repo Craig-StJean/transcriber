@@ -51,7 +51,7 @@ impl std::fmt::Display for ApiError {
 impl std::error::Error for ApiError {}
 
 /// Turn a non-2xx response into an `ApiError`, passing successes through.
-async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> {
+pub async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> {
     let status = response.status();
     if status.is_success() {
         return Ok(response);
@@ -65,6 +65,25 @@ async fn check_status(response: reqwest::Response) -> Result<reqwest::Response> 
         .map(Duration::from_secs_f64);
     let body = response.text().await.unwrap_or_default();
     Err(ApiError { status, body: truncate(body.trim(), BODY_LIMIT), retry_after }.into())
+}
+
+/// Short user-facing form of any request error: the provider's own message
+/// for HTTP errors, a plain phrase for timeouts and connection failures.
+/// The full error (with response body) is for logs and history.
+pub fn error_detail(e: &anyhow::Error) -> String {
+    if let Some(api) = e.downcast_ref::<ApiError>() {
+        api.short()
+    } else if let Some(re) = e.downcast_ref::<reqwest::Error>() {
+        if re.is_timeout() {
+            "request timed out".into()
+        } else if re.is_connect() {
+            "could not connect".into()
+        } else {
+            re.to_string()
+        }
+    } else {
+        e.to_string()
+    }
 }
 
 fn truncate(s: &str, max_chars: usize) -> String {

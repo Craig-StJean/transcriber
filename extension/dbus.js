@@ -34,6 +34,9 @@ export const INTERFACE_XML = `
     <signal name="ErrorOccurred">
       <arg type="s" name="message"/>
     </signal>
+    <signal name="SessionDiscarded">
+      <arg type="s" name="reason"/>
+    </signal>
   </interface>
 </node>`;
 

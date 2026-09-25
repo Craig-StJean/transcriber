@@ -60,17 +60,15 @@ Notes:
   a running estimate and the daemon drops whole terms off the end of the list
   rather than letting the API cut mid-word. The estimate deliberately over-counts,
   since proper nouns tokenize worse than prose.
-- **Cohere is excluded.** Its endpoint is only OpenAI-shaped and documents no
-  `prompt` field, so the hint is withheld there rather than risk a 400 on every
-  request. The Settings group greys out when Cohere is selected. Custom endpoints
-  do get it.
+- Custom endpoints get it too (OpenAI-compatible by definition).
+- On silent audio Whisper tends to return the list itself as the transcript;
+  the daemon recognises that echo and discards it as "no speech".
 - When post-processing is on, the same list is appended to the LLM's system
   prompt as the authoritative spellings, so the polish pass fixes near-misses
   ("accu dose" → "AccuDose") instead of "correcting" unusual terms away. This
-  uses the full list (no 224-token cap) and applies with every provider,
-  Cohere included.
-- Streaming providers (Deepgram, AssemblyAI) have their own keyword-boost
-  mechanisms and are not wired to this list.
+  uses the full list (no 224-token cap).
+- Streaming (Deepgram) has its own keyword-boost mechanism and is not wired to
+  this list.
 
 Transcription history is stored in `~/.local/share/transcriber/history.db` (SQLite).
 

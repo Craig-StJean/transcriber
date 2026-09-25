@@ -11,6 +11,7 @@ use zbus::{interface, names::InterfaceName, object_server::SignalEmitter, zvaria
 
 use crate::api::ApiError;
 use crate::audio::{self, PcmBuffer};
+use crate::connections::{self, postprocess_label, provider_label};
 use crate::db::Database;
 use crate::streaming::{self, StreamEvent};
 use common::config::AppConfig;
@@ -54,6 +55,10 @@ impl DaemonState {
 
 /// Recordings shorter than this are treated as accidental key presses.
 const MIN_RECORDING_SECS: f32 = 0.3;
+
+/// SessionDiscarded reasons.
+const CANCELLED: &str = "cancelled";
+const NO_SPEECH: &str = "no-speech";
 
 /// The daemon state plus the session it belongs to.
 ///
@@ -207,6 +212,17 @@ impl Core {
         true
     }
 
+    /// End the session in Idle without text, announcing
+    /// SessionDiscarded(`reason`) just before StateChanged so clients can tell "nothing heard" from a normal
+    /// finish. Silent if the session is stale.
+    async fn discard(&self, emitter: &SignalEmitter<'_>, generation: u64, reason: &str) {
+        if !self.transition(generation, DaemonState::Idle) {
+            return;
+        }
+        emit_discarded(emitter, reason).await;
+        emit_state(emitter, "Idle").await;
+    }
+
     /// Enter Error with a short, user-facing `message`, announcing it with
     /// ErrorOccurred just before StateChanged so clients can show *why*.
     async fn fail(&self, emitter: &SignalEmitter<'_>, generation: u64, message: String) {
@@ -257,7 +273,7 @@ impl Core {
                 "skipping transcription: {} samples, speech detected: {speech_detected}",
                 samples.len()
             );
-            self.set_state(emitter, generation, DaemonState::Idle).await;
+            self.discard(emitter, generation, NO_SPEECH).await;
             return;
         }
 
@@ -268,6 +284,12 @@ impl Core {
         tokio::spawn(async move {
             run_batch_pipeline(core, generation, emitter, cfg, samples).await;
         });
+    }
+}
+
+async fn emit_discarded(emitter: &SignalEmitter<'_>, reason: &str) {
+    if let Err(e) = TranscriberInterface::session_discarded(emitter, reason).await {
+        tracing::warn!("failed to emit SessionDiscarded: {e}");
     }
 }
 
@@ -337,6 +359,13 @@ impl TranscriberInterface {
     #[zbus(signal)]
     async fn error_occurred(emitter: &SignalEmitter<'_>, message: &str) -> zbus::Result<()>;
 
+    /// Emitted immediately before StateChanged("Idle") when a session ends
+    /// without text, so clients can say why nothing was typed.
+    /// `reason`: "cancelled" (Cancel during an active session) or
+    /// "no-speech" (too short, silence, or an empty transcript).
+    #[zbus(signal)]
+    async fn session_discarded(emitter: &SignalEmitter<'_>, reason: &str) -> zbus::Result<()>;
+
     /// Emitted after a successful transcription with the resulting text.
     #[zbus(signal)]
     async fn transcription_ready(emitter: &SignalEmitter<'_>, text: &str) -> zbus::Result<()>;
@@ -380,7 +409,7 @@ impl TranscriberInterface {
         if streaming {
             let problem = if !cfg.direct_injection {
                 Some("streaming requires direct injection to be enabled")
-            } else if cfg.active_streaming_key().is_empty() {
+            } else if cfg.deepgram_api_key.is_empty() {
                 Some("missing API key")
             } else {
                 None
@@ -388,7 +417,7 @@ impl TranscriberInterface {
             if let Some(problem) = problem {
                 // Fail before opening the mic: otherwise the user would talk
                 // into a recording that can only ever end in an auth error.
-                let msg = format!("{}: {problem}", streaming_label(&cfg));
+                let msg = format!("Deepgram: {problem}");
                 core.fail(&emitter, generation, msg.clone()).await;
                 return Err(zbus::fdo::Error::Failed(msg));
             }
@@ -439,14 +468,20 @@ impl TranscriberInterface {
         &self,
         #[zbus(signal_emitter)] emitter: SignalEmitter<'_>,
     ) -> zbus::fdo::Result<()> {
-        {
+        let was_active = {
             let mut st = self.core.state.lock().unwrap();
+            let was_active = st.state.is_busy();
             // Invalidate whatever is in flight; see `StateCell`.
             st.generation += 1;
             st.state = DaemonState::Idle;
             // Abort, not end-of-stream: dropping the audio sender would make
             // the provider flush and return the final transcript.
             self.core.capture.lock().unwrap().teardown(true);
+            was_active
+        };
+        // Cancel also dismisses a Done/Error display; that discards nothing.
+        if was_active {
+            emit_discarded(&emitter, CANCELLED).await;
         }
         emit_state(&emitter, "Idle").await;
         Ok(())
@@ -560,6 +595,75 @@ impl TranscriberInterface {
             }
         }
     }
+
+    /// Check every provider the current config uses (transcription always;
+    /// streaming and post-processing only if enabled) with a cheap
+    /// authenticated request, concurrently. Returns a JSON array of
+    /// `{"name": str, "ok": bool, "detail": str}`; per-provider failures are
+    /// reported there rather than as a DBus error. Doesn't touch daemon state,
+    /// so it is safe to call mid-recording.
+    async fn test_connections(&self) -> zbus::fdo::Result<String> {
+        let cfg = self.core.config();
+        let checks = connections::test_all(&self.core.http_client, &cfg).await;
+        serde_json::to_string(&checks).map_err(|e| zbus::fdo::Error::Failed(e.to_string()))
+    }
+
+    /// Re-run post-processing on a history entry's raw transcript (its
+    /// `text_original` if it has one, else its `text`) and store the result.
+    /// Returns the new text.
+    ///
+    /// Needs a configured post-processing provider but not
+    /// `postprocess_enabled`, so a user can polish the odd entry without
+    /// paying the latency on every recording.
+    async fn repolish_entry(&self, id: i64) -> zbus::fdo::Result<String> {
+        let failed = |m: String| zbus::fdo::Error::Failed(m);
+        let cfg   = self.core.config();
+        let label = postprocess_label(&cfg);
+        if let Some(problem) = connections::postprocess_problem(&cfg) {
+            return Err(failed(format!("Post-processing is not set up: {problem}")));
+        }
+
+        let db = self.core.db.clone();
+        let (text, original) = tokio::task::spawn_blocking(move || db.texts(id))
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .map_err(|e| failed(e.to_string()))?
+            .ok_or_else(|| failed(format!("history entry {id} not found")))?;
+        // Polish the raw transcript, not an earlier polish: re-polishing
+        // polished text would compound the LLM's edits with every run.
+        let source = original.filter(|o| !o.is_empty()).unwrap_or(text);
+        if source.is_empty() {
+            return Err(failed(format!(
+                "history entry {id} has no text to post-process (its transcription failed; retry it first)"
+            )));
+        }
+
+        let polished = crate::api::postprocess(
+            &self.core.http_client,
+            cfg.active_postprocess_url(),
+            cfg.active_postprocess_key(),
+            cfg.active_postprocess_model(),
+            &cfg.active_postprocess_system_prompt(),
+            &source,
+        )
+        .await
+        .map_err(|e| {
+            tracing::warn!("re-polish of {id} failed: {e}");
+            failed(format!("{label}: {}", crate::api::error_detail(&e)))
+        })?;
+        if polished.is_empty() {
+            return Err(failed(format!("{label}: returned no text")));
+        }
+
+        let db = self.core.db.clone();
+        let text = polished.clone();
+        tokio::task::spawn_blocking(move || db.update_retry_success(id, &text, Some(&source)))
+            .await
+            .map_err(|e| failed(e.to_string()))?
+            .map_err(|e| failed(e.to_string()))?;
+        tracing::info!("re-polished history entry {id}: {} chars", polished.len());
+        Ok(polished)
+    }
 }
 
 // ── Background tasks ──────────────────────────────────────────────────────────
@@ -662,32 +766,20 @@ async fn run_stream_session(
     cfg: AppConfig,
     audio_rx: streaming::AudioRx,
 ) {
-    let label = streaming_label(&cfg);
-    let session = match cfg.streaming_provider.as_str() {
-        "assemblyai" => {
-            streaming::start_assemblyai_session(
-                &cfg.assemblyai_api_key,
-                cfg.sample_rate,
-                cfg.active_language(),
-                audio_rx,
-            ).await
-        }
-        _ => {
-            streaming::start_deepgram_session(
-                &cfg.deepgram_api_key,
-                &cfg.deepgram_model,
-                cfg.sample_rate,
-                cfg.active_language(),
-                audio_rx,
-            ).await
-        }
-    };
+    let session = streaming::start_deepgram_session(
+        &cfg.deepgram_api_key,
+        &cfg.deepgram_model,
+        cfg.sample_rate,
+        cfg.active_language(),
+        audio_rx,
+    )
+    .await;
     let mut session = match session {
         Ok(s)  => s,
         Err(e) => {
             // `fail` also tears down the capture, so the mic doesn't keep
             // running into a stream that will never exist.
-            core.fail(&emitter, generation, format!("{label}: {e:#}")).await;
+            core.fail(&emitter, generation, format!("Deepgram: {e:#}")).await;
             return;
         }
     };
@@ -713,7 +805,7 @@ async fn run_stream_session(
             Some(StreamEvent::Done) | None => {
                 tracing::info!("streaming done: {} chars", accumulated.len());
                 if accumulated.is_empty() {
-                    core.set_state(&emitter, generation, DaemonState::Idle).await;
+                    core.discard(&emitter, generation, NO_SPEECH).await;
                 } else if deliver(&core, generation, &emitter, &cfg, accumulated, None, None).await {
                     core.set_state(&emitter, generation, DaemonState::Done).await;
                 }
@@ -725,7 +817,7 @@ async fn run_stream_session(
                 if !accumulated.is_empty() {
                     deliver(&core, generation, &emitter, &cfg, accumulated, None, None).await;
                 }
-                core.fail(&emitter, generation, format!("{label}: {e}")).await;
+                core.fail(&emitter, generation, format!("Deepgram: {e}")).await;
                 return;
             }
         }
@@ -778,7 +870,7 @@ async fn run_batch_pipeline(
     match result {
         Ok((text, _)) if text.is_empty() => {
             tracing::info!("transcription came back empty");
-            core.set_state(&emitter, generation, DaemonState::Idle).await;
+            core.discard(&emitter, generation, NO_SPEECH).await;
         }
         Ok((text, original)) => {
             let path = wav_path();
@@ -861,38 +953,10 @@ fn save_wav_to_disk(wav: &[u8]) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn provider_label(cfg: &AppConfig) -> &'static str {
-    match cfg.provider.as_str() {
-        "groq"   => "Groq",
-        "cohere" => "Cohere",
-        _        => "Custom endpoint",
-    }
-}
-
-fn streaming_label(cfg: &AppConfig) -> &'static str {
-    match cfg.streaming_provider.as_str() {
-        "assemblyai" => "AssemblyAI",
-        _            => "Deepgram",
-    }
-}
-
 /// Short user-facing form of a transcription error, e.g. "Groq: 413 file too
 /// large". The full error (with response body) goes to logs and history.
 fn describe_error(cfg: &AppConfig, e: &anyhow::Error) -> String {
-    let detail = if let Some(api) = e.downcast_ref::<ApiError>() {
-        api.short()
-    } else if let Some(re) = e.downcast_ref::<reqwest::Error>() {
-        if re.is_timeout() {
-            "request timed out".into()
-        } else if re.is_connect() {
-            "could not connect".into()
-        } else {
-            re.to_string()
-        }
-    } else {
-        e.to_string()
-    };
-    format!("{}: {detail}", provider_label(cfg))
+    format!("{}: {}", provider_label(cfg), crate::api::error_detail(e))
 }
 
 /// Returns true for errors that may be transient and worth retrying.
@@ -917,7 +981,7 @@ async fn transcribe_with_retry(
     wav: &[u8],
 ) -> Result<String> {
     // Custom endpoints may legitimately be keyless (a local whisper server).
-    if cfg.active_key().is_empty() && matches!(cfg.provider.as_str(), "groq" | "cohere") {
+    if cfg.active_key().is_empty() && cfg.provider == "groq" {
         return Err(anyhow!("missing API key"));
     }
 
@@ -969,8 +1033,16 @@ async fn transcribe_and_polish(
     wav: &[u8],
     before_polish: impl Future<Output = ()>,
 ) -> Result<(String, Option<String>)> {
-    let raw = transcribe_with_retry(client, cfg, wav).await?;
+    let mut raw = transcribe_with_retry(client, cfg, wav).await?;
     tracing::info!("transcription done: {} chars", raw.len());
+
+    // Silence makes Whisper return the vocabulary prompt as the transcript.
+    // Treat that as empty so callers take the no-speech path (Idle, no paste)
+    // instead of typing the vocabulary list into the focused window.
+    if cfg.is_prompt_echo(&raw) {
+        tracing::info!("transcript is only the vocabulary prompt echoed back; treating as empty");
+        raw.clear();
+    }
 
     if !cfg.postprocess_enabled || raw.is_empty() {
         return Ok((raw, None));

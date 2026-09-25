@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct AppConfig {
-    /// Active provider: "groq" | "cohere" | "custom"
+    /// Active provider: "groq" | "custom"
     #[serde(default = "default_provider")]
     pub provider: String,
 
@@ -13,12 +13,6 @@ pub struct AppConfig {
     pub groq_api_key: String,
     #[serde(default = "default_groq_model")]
     pub groq_model: String,
-
-    // ── Cohere ────────────────────────────────────────────────────────────────
-    #[serde(default)]
-    pub cohere_api_key: String,
-    #[serde(default = "default_cohere_model")]
-    pub cohere_model: String,
 
     // ── Custom endpoint ───────────────────────────────────────────────────────
     #[serde(default)]
@@ -30,7 +24,6 @@ pub struct AppConfig {
 
     // ── Shared ────────────────────────────────────────────────────────────────
     /// BCP-47 language code hint, e.g. Some("en"). None lets the API auto-detect.
-    /// Note: Cohere requires a language; if None it defaults to "en".
     pub language: Option<String>,
     /// Microphone sample rate in Hz (16000 recommended for Whisper).
     pub sample_rate: u32,
@@ -81,21 +74,15 @@ pub struct AppConfig {
 
     // ── Real-time streaming ───────────────────────────────────────────────────
     /// Stream audio over WebSocket for real-time transcription (~300 ms latency).
-    /// Requires direct_injection to be enabled. Groq/Cohere do not support streaming.
+    /// Uses Deepgram. Requires direct_injection to be enabled.
     #[serde(default)]
     pub streaming_enabled: bool,
-    /// Streaming provider: "deepgram" | "assemblyai"
-    #[serde(default = "default_streaming_provider")]
-    pub streaming_provider: String,
     /// Deepgram API key (from console.deepgram.com).
     #[serde(default)]
     pub deepgram_api_key: String,
     /// Deepgram model name (e.g. "nova-3").
     #[serde(default = "default_deepgram_model")]
     pub deepgram_model: String,
-    /// AssemblyAI API key (from assemblyai.com).
-    #[serde(default)]
-    pub assemblyai_api_key: String,
 
     // ── Post-processing (LLM polish pass) ─────────────────────────────────────
     /// Send the raw transcript through a chat LLM to fix transcription errors and
@@ -143,8 +130,6 @@ fn default_provider()           -> String { "groq".into() }
 fn default_groq_model()         -> String { "whisper-large-v3-turbo".into() }
 fn default_audio_level_gain()   -> f64    { 25.0 }
 fn default_overlay_keyboard_mode() -> String { "ondemand".into() }
-fn default_cohere_model()       -> String { "cohere-transcribe-03-2026".into() }
-fn default_streaming_provider() -> String { "deepgram".into() }
 fn default_deepgram_model()     -> String { "nova-3".into() }
 fn default_true()               -> bool   { true }
 
@@ -207,8 +192,6 @@ impl Default for AppConfig {
             provider:       default_provider(),
             groq_api_key:   String::new(),
             groq_model:     default_groq_model(),
-            cohere_api_key: String::new(),
-            cohere_model:   default_cohere_model(),
             custom_api_url: String::new(),
             custom_api_key: String::new(),
             custom_model:   String::new(),
@@ -224,10 +207,8 @@ impl Default for AppConfig {
             vocabulary:         default_vocabulary(),
             vocabulary_enabled: true,
             streaming_enabled:    false,
-            streaming_provider:   default_streaming_provider(),
             deepgram_api_key:     String::new(),
             deepgram_model:       default_deepgram_model(),
-            assemblyai_api_key:   String::new(),
             postprocess_enabled:        false,
             postprocess_provider:       default_postprocess_provider(),
             postprocess_groq_api_key:   String::new(),
@@ -248,27 +229,24 @@ impl AppConfig {
     /// URL of the active transcription endpoint.
     pub fn active_url(&self) -> &str {
         match self.provider.as_str() {
-            "groq"   => "https://api.groq.com/openai/v1/audio/transcriptions",
-            "cohere" => "https://api.cohere.com/v2/audio/transcriptions",
-            _        => &self.custom_api_url,
+            "groq" => "https://api.groq.com/openai/v1/audio/transcriptions",
+            _      => &self.custom_api_url,
         }
     }
 
     /// API key for the active provider.
     pub fn active_key(&self) -> &str {
         match self.provider.as_str() {
-            "groq"   => &self.groq_api_key,
-            "cohere" => &self.cohere_api_key,
-            _        => &self.custom_api_key,
+            "groq" => &self.groq_api_key,
+            _      => &self.custom_api_key,
         }
     }
 
     /// Model name for the active provider.
     pub fn active_model(&self) -> &str {
         match self.provider.as_str() {
-            "groq"   => &self.groq_model,
-            "cohere" => &self.cohere_model,
-            _        => &self.custom_model,
+            "groq" => &self.groq_model,
+            _      => &self.custom_model,
         }
     }
 
@@ -277,12 +255,8 @@ impl AppConfig {
     /// Returns `None` when there is nothing to send, so the caller omits the
     /// parameter rather than posting an empty one.
     ///
-    /// Cohere is excluded on purpose: its `/v2/audio/transcriptions` endpoint is
-    /// only OpenAI-*shaped*, and does not document a `prompt` field. Sending an
-    /// unrecognised multipart field there risks a 400 on every request, which
-    /// would turn a cosmetic feature into a total transcription outage. Custom
-    /// endpoints are included — they are OpenAI-compatible by definition, which
-    /// covers a local whisper.cpp or faster-whisper server.
+    /// Custom endpoints get it too — they are OpenAI-compatible by definition,
+    /// which covers a local whisper.cpp or faster-whisper server.
     ///
     /// The terms are joined into a bare comma-separated list rather than a
     /// sentence like "The following words may appear: …". Whisper conditions on
@@ -291,7 +265,7 @@ impl AppConfig {
     /// transcribed words. A list of proper nouns is the shape that actually
     /// biases the decoder.
     pub fn active_prompt(&self) -> Option<String> {
-        if !self.vocabulary_enabled || self.provider == "cohere" {
+        if !self.vocabulary_enabled {
             return None;
         }
 
@@ -316,23 +290,36 @@ impl AppConfig {
         }
     }
 
-    /// API key for the active streaming provider.
-    pub fn active_streaming_key(&self) -> &str {
-        match self.streaming_provider.as_str() {
-            "assemblyai" => &self.assemblyai_api_key,
-            _            => &self.deepgram_api_key,
+    /// Whether `text` is just Whisper parroting back the `prompt` we sent.
+    ///
+    /// On silent or near-silent audio Whisper has nothing to decode, so it
+    /// continues the "preceding transcript" it was given — the vocabulary list —
+    /// and returns something like "AccuDose, Safehous." as if it had been said.
+    /// With VAD off there is no speech check upstream to stop this, so the
+    /// transcript itself is the only place to catch it.
+    ///
+    /// Matches when every word of `text` is a prompt word *and* there are at
+    /// least as many words as the prompt has — i.e. the whole list (possibly
+    /// repeated), in any punctuation. A genuine one-word dictation of a single
+    /// term ("AccuDose") is shorter than the list and so still goes through.
+    pub fn is_prompt_echo(&self, text: &str) -> bool {
+        fn words(s: &str) -> Vec<String> {
+            s.split(|c: char| !c.is_alphanumeric())
+                .filter(|w| !w.is_empty())
+                .map(str::to_lowercase)
+                .collect()
         }
+        let Some(prompt) = self.active_prompt() else { return false };
+        let prompt_words = words(&prompt);
+        let text_words = words(text);
+        !text_words.is_empty()
+            && text_words.len() >= prompt_words.len()
+            && text_words.iter().all(|w| prompt_words.contains(w))
     }
 
-    /// Language for the active provider.
-    /// Cohere requires a language field; falls back to "en" if not configured.
+    /// Language hint, if any. None lets the API auto-detect.
     pub fn active_language(&self) -> Option<&str> {
-        let lang = self.language.as_deref();
-        if self.provider == "cohere" {
-            Some(lang.unwrap_or("en"))
-        } else {
-            lang
-        }
+        self.language.as_deref()
     }
 
     /// URL of the active post-processing chat-completions endpoint.
@@ -363,9 +350,8 @@ impl AppConfig {
     /// Unlike `active_prompt()`, this is a real instruction to an instruction-
     /// following model, so it can say *how* to use the terms: fix near-misses
     /// and split/merged forms, keep the exact casing, and never insert a term
-    /// that wasn't spoken. It also isn't subject to Whisper's 224-token cap or
-    /// the Cohere exclusion — the whole list is sent regardless of which
-    /// transcription provider produced the text.
+    /// that wasn't spoken. It also isn't subject to Whisper's 224-token cap —
+    /// the whole list is sent.
     pub fn active_postprocess_system_prompt(&self) -> String {
         let terms: Vec<&str> = if self.vocabulary_enabled {
             self.vocabulary.iter().map(|t| t.trim()).filter(|t| !t.is_empty()).collect()
@@ -476,10 +462,6 @@ pub fn load() -> Result<AppConfig> {
             cfg.provider     = "groq".into();
             cfg.groq_api_key = old_key;
             if !old_model.is_empty() { cfg.groq_model = old_model; }
-        } else if old_url.contains("cohere.com") {
-            cfg.provider        = "cohere".into();
-            cfg.cohere_api_key  = old_key;
-            if !old_model.is_empty() { cfg.cohere_model = old_model; }
         } else {
             cfg.provider        = "custom".into();
             cfg.custom_api_url  = old_url;
@@ -491,7 +473,20 @@ pub fn load() -> Result<AppConfig> {
         return Ok(cfg);
     }
 
-    Ok(serde_json::from_str(&text)?)
+    let mut cfg: AppConfig = serde_json::from_str(&text)?;
+    retire_removed_providers(&mut cfg);
+    Ok(cfg)
+}
+
+/// Cohere (batch) and AssemblyAI (streaming) were removed. A config written
+/// while one was selected still names it; fall back to Groq rather than
+/// sending requests to a provider the code no longer knows. The old
+/// `cohere_*` / `assemblyai_*` / `streaming_provider` keys are unknown fields
+/// now — serde skips them on load and the next save drops them.
+fn retire_removed_providers(cfg: &mut AppConfig) {
+    if !matches!(cfg.provider.as_str(), "groq" | "custom") {
+        cfg.provider = default_provider();
+    }
 }
 
 /// Write `cfg` to `config.json` atomically, readable only by the owner.
@@ -571,9 +566,16 @@ mod tests {
     }
 
     #[test]
-    fn cohere_never_receives_a_prompt() {
-        let cfg = AppConfig { provider: "cohere".into(), ..AppConfig::default() };
-        assert_eq!(cfg.active_prompt(), None);
+    fn a_config_naming_a_removed_provider_falls_back_to_groq() {
+        let mut cfg: AppConfig = serde_json::from_str(r#"{
+            "provider": "cohere", "cohere_api_key": "k",
+            "streaming_provider": "assemblyai", "assemblyai_api_key": "k",
+            "language": "en", "sample_rate": 16000
+        }"#).expect("old keys are ignored, not rejected");
+        retire_removed_providers(&mut cfg);
+        assert_eq!(cfg.provider, "groq");
+        let saved = serde_json::to_string(&cfg).unwrap();
+        assert!(!saved.contains("cohere") && !saved.contains("assemblyai"));
     }
 
     #[test]
@@ -618,6 +620,24 @@ mod tests {
     }
 
     #[test]
+    fn a_parroted_prompt_is_recognised_as_an_echo() {
+        let cfg = AppConfig::default();
+        assert!(cfg.is_prompt_echo("AccuDose, Safehous."));
+        assert!(cfg.is_prompt_echo("accudose safehous"));
+        assert!(cfg.is_prompt_echo("AccuDose, Safehous. AccuDose, Safehous."));
+    }
+
+    #[test]
+    fn real_speech_is_not_an_echo() {
+        let cfg = AppConfig::default();
+        assert!(!cfg.is_prompt_echo("AccuDose"), "a single spoken term is shorter than the list");
+        assert!(!cfg.is_prompt_echo("Open AccuDose and Safehous"));
+        assert!(!cfg.is_prompt_echo(""));
+        let off = AppConfig { vocabulary_enabled: false, ..AppConfig::default() };
+        assert!(!off.is_prompt_echo("AccuDose, Safehous."), "no prompt sent, nothing to echo");
+    }
+
+    #[test]
     fn postprocess_prompt_lists_the_vocabulary() {
         let cfg = cfg_with(&["  AccuDose ", "", "Safehous"]);
         let prompt = cfg.active_postprocess_system_prompt();
@@ -633,11 +653,7 @@ mod tests {
     }
 
     #[test]
-    fn postprocess_prompt_keeps_vocabulary_for_cohere_and_past_whisper_cap() {
-        let mut cfg = cfg_with(&["Kubernetes"]);
-        cfg.provider = "cohere".into();
-        assert!(cfg.active_postprocess_system_prompt().contains("* Kubernetes"));
-
+    fn postprocess_prompt_keeps_vocabulary_past_whisper_cap() {
         let terms: Vec<String> = (0..200).map(|i| format!("Term{i}")).collect();
         let cfg = AppConfig { vocabulary: terms, ..AppConfig::default() };
         assert!(cfg.active_postprocess_system_prompt().contains("* Term199"));

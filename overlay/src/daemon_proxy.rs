@@ -33,6 +33,11 @@ pub trait Daemon {
     #[zbus(signal)]
     async fn error_occurred(&self, message: String) -> zbus::Result<()>;
 
+    /// Emitted right before `StateChanged("Idle")` when a session ends
+    /// without text. Reason: "cancelled" | "no-speech".
+    #[zbus(signal)]
+    async fn session_discarded(&self, reason: String) -> zbus::Result<()>;
+
     /// Audio VU level in range 0.0–1.0, emitted ~30 Hz while recording.
     #[zbus(signal)]
     async fn audio_level(&self, level: f64) -> zbus::Result<()>;
@@ -58,6 +63,7 @@ pub trait Daemon {
 pub enum DaemonEvent {
     StateChanged(String),
     ErrorOccurred(String),
+    SessionDiscarded(String),
     AudioLevel(f64),
     TranscriptionReady(String),
     TranscriptionChunk(String),
@@ -127,7 +133,7 @@ pub async fn subscribe(
     event_tx: &async_channel::Sender<DaemonEvent>,
     current_state: &Arc<Mutex<String>>,
 ) -> zbus::Result<Subscription> {
-    let mut handles = Vec::with_capacity(5);
+    let mut handles = Vec::with_capacity(6);
 
     // ── StateChanged ──────────────────────────────────────────────────────────
     let tx = event_tx.clone();
@@ -148,6 +154,17 @@ pub async fn subscribe(
         while let Some(signal) = stream.next().await {
             if let Ok(args) = signal.args() {
                 tx.send(DaemonEvent::ErrorOccurred(args.message().to_owned())).await.ok();
+            }
+        }
+    }));
+
+    // ── SessionDiscarded ──────────────────────────────────────────────────────
+    let tx = event_tx.clone();
+    let mut stream = proxy.receive_session_discarded().await?;
+    handles.push(tokio::spawn(async move {
+        while let Some(signal) = stream.next().await {
+            if let Ok(args) = signal.args() {
+                tx.send(DaemonEvent::SessionDiscarded(args.reason().to_owned())).await.ok();
             }
         }
     }));

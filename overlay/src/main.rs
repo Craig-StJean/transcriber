@@ -76,17 +76,23 @@ async fn handle_events(
     // Re-read at the start of every recording so toggling it in the settings
     // app takes effect without restarting the overlay.
     let mut direct_injection = load_direct_injection();
-    // Cursor into the running streaming transcript — chunks are cumulative,
-    // so we type only the new suffix on each emission.
-    let mut last_chunk = String::new();
+    // The streaming transcript typed so far this session — chunks are
+    // cumulative, so each one types only its suffix beyond this.
+    let mut stream_typed = String::new();
+    // Whether any chunk was actually typed this session. The final text is
+    // then only ever completed, never retyped from scratch.
+    let mut typed_via_chunks = false;
     // Set when typing a chunk failed; the final text then goes to the
     // clipboard instead of being typed (partially) again.
     let mut inject_failed = false;
-    // Whether the last result was typed (vs copied) — picks the Done label.
-    let mut typed = false;
+    // How the last result was delivered — picks the Done label.
+    let mut output = Output::Copied;
     // Latest ErrorOccurred message, shown on the following Error state.
     let mut last_error: Option<String> = None;
-    // Last state seen, used to tell a cancel (active → Idle) from a plain Idle.
+    // Set by SessionDiscarded, which precedes the Idle it explains: that
+    // Idle must not cut the message short.
+    let mut discard_shown = false;
+    // Last state seen, used to drop stale chunks/results.
     let mut prev_state = String::from("Idle");
 
     while let Ok(event) = event_rx.recv().await {
@@ -95,14 +101,21 @@ async fn handle_events(
                 match state.as_str() {
                     "Recording" => {
                         direct_injection = load_direct_injection();
-                        last_chunk.clear();
+                        stream_typed.clear();
+                        typed_via_chunks = false;
                         inject_failed = false;
-                        typed = false;
+                        output = Output::Copied;
                         last_error = None;
+                        discard_shown = false;
                         overlay.handle_state(&state);
                     }
                     "Done" => {
-                        overlay.show_message(if typed { "✓ Typed!" } else { "✓ Copied!" }, 800);
+                        let msg = match output {
+                            Output::Typed => "✓ Typed!",
+                            Output::Copied => "✓ Copied!",
+                            Output::Mismatch => "Copied (stream mismatch)",
+                        };
+                        overlay.show_message(msg, 800);
                     }
                     "Error" => {
                         let msg = match last_error.take() {
@@ -112,15 +125,15 @@ async fn handle_events(
                         overlay.show_message(&msg, 3500);
                     }
                     "Idle" => {
-                        last_chunk.clear();
-                        if is_active(&prev_state) {
-                            // Active → Idle without Done/Error: the recording
-                            // was cancelled (or was empty and discarded).
-                            overlay.show_message("Cancelled", 800);
-                        } else if prev_state == "Idle" {
+                        if discard_shown {
+                            // "Cancelled"/"No speech detected" is showing.
+                            discard_shown = false;
+                        } else if !matches!(prev_state.as_str(), "Done" | "Error") {
+                            // Any other Idle (e.g. the daemon restarted
+                            // mid-recording) just hides the overlay. After
+                            // Done/Error that message is already fading.
                             overlay.handle_state(&state);
                         }
-                        // From Done/Error: that message is already fading.
                     }
                     _ => overlay.handle_state(&state),
                 }
@@ -130,6 +143,17 @@ async fn handle_events(
                 tracing::warn!("daemon error: {message}");
                 last_error = Some(message);
             }
+            DaemonEvent::SessionDiscarded(reason) => match reason.as_str() {
+                "cancelled" => {
+                    overlay.show_message("Cancelled", 800);
+                    discard_shown = true;
+                }
+                "no-speech" => {
+                    overlay.show_message("No speech detected", 1200);
+                    discard_shown = true;
+                }
+                other => tracing::warn!("unknown SessionDiscarded reason {other:?}"),
+            },
             DaemonEvent::AudioLevel(level) => {
                 overlay.set_level(level);
             }
@@ -143,20 +167,30 @@ async fn handle_events(
                 {
                     continue;
                 }
-                if let Some(delta) = text.strip_prefix(last_chunk.as_str()) {
-                    if !delta.is_empty() {
-                        match type_text(delta) {
-                            Ok(()) => typed = true,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "direct injection (chunk) failed: {e} — \
-                                     final text will go to the clipboard"
-                                );
-                                inject_failed = true;
-                            }
-                        }
+                let Some(delta) = text.strip_prefix(stream_typed.as_str()) else {
+                    tracing::warn!(
+                        "stream chunk ({} chars) does not extend the {} chars already typed \
+                         — not typing it",
+                        text.len(),
+                        stream_typed.len()
+                    );
+                    continue;
+                };
+                if delta.is_empty() {
+                    continue;
+                }
+                match type_text(delta) {
+                    Ok(()) => {
+                        typed_via_chunks = true;
+                        stream_typed = text;
                     }
-                    last_chunk = text;
+                    Err(e) => {
+                        tracing::warn!(
+                            "direct injection (chunk) failed: {e} — \
+                             final text will go to the clipboard"
+                        );
+                        inject_failed = true;
+                    }
                 }
             }
             DaemonEvent::TranscriptionReady(text) => {
@@ -164,36 +198,53 @@ async fn handle_events(
                 if prev_state == "Idle" {
                     continue;
                 }
-                if direct_injection && !inject_failed {
-                    // If streaming already typed everything, this is a no-op.
-                    // Otherwise (batch path) type the whole thing.
-                    let to_type = text.strip_prefix(last_chunk.as_str()).unwrap_or(&text);
-                    if to_type.is_empty() {
-                        typed = true;
-                    } else {
-                        match type_text(to_type) {
-                            Ok(()) => typed = true,
-                            Err(e) => {
-                                tracing::warn!(
-                                    "direct injection failed: {e} — copying to clipboard instead"
-                                );
-                                copy_to_clipboard(&text);
-                                typed = false;
-                            }
+                output = if !direct_injection || inject_failed {
+                    copy_to_clipboard(&text);
+                    Output::Copied
+                } else if typed_via_chunks {
+                    // Streaming already typed a prefix: complete it, but
+                    // never retype text that's already in the window.
+                    match text.strip_prefix(stream_typed.as_str()) {
+                        Some("") => Output::Typed,
+                        Some(rest) => type_or_copy(rest, &text),
+                        None => {
+                            tracing::warn!(
+                                "final text ({} chars) does not extend the {} chars \
+                                 already typed — copying to clipboard instead",
+                                text.len(),
+                                stream_typed.len()
+                            );
+                            copy_to_clipboard(&text);
+                            Output::Mismatch
                         }
                     }
                 } else {
-                    copy_to_clipboard(&text);
-                    typed = false;
-                }
-                last_chunk.clear();
+                    type_or_copy(&text, &text)
+                };
             }
         }
     }
 }
 
-fn is_active(state: &str) -> bool {
-    matches!(state, "Recording" | "Transcribing" | "Streaming" | "PostProcessing")
+/// How a session's text reached the user.
+#[derive(Clone, Copy)]
+enum Output {
+    Typed,
+    Copied,
+    /// Final text disagreed with the streamed text already typed.
+    Mismatch,
+}
+
+/// Type `to_type`; if that fails, put the whole `full` text on the clipboard.
+fn type_or_copy(to_type: &str, full: &str) -> Output {
+    match type_text(to_type) {
+        Ok(()) => Output::Typed,
+        Err(e) => {
+            tracing::warn!("direct injection failed: {e} — copying to clipboard instead");
+            copy_to_clipboard(full);
+            Output::Copied
+        }
+    }
 }
 
 fn load_direct_injection() -> bool {

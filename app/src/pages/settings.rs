@@ -1,5 +1,3 @@
-use std::rc::Rc;
-
 use common::config;
 use gtk4::gio;
 use libadwaita as adw;
@@ -15,18 +13,10 @@ pub struct SettingsPage {
     pub page:               adw::PreferencesPage,
     pub streaming_expander: adw::ExpanderRow,
     pub direct_inject_row:  adw::SwitchRow,
-    /// Re-evaluates whether the vocabulary controls do anything. Depends on
-    /// both the transcription provider and the post-processing switch.
-    pub sync_vocab:         Rc<dyn Fn()>,
 }
 
-fn provider_idx(p: &str) -> u32 {
-    match p { "cohere" => 1, "custom" => 2, _ => 0 }
-}
-
-fn provider_str(idx: u32) -> &'static str {
-    match idx { 1 => "cohere", 2 => "custom", _ => "groq" }
-}
+/// Combo order: Groq, Custom.
+const PROVIDERS: [&str; 2] = ["groq", "custom"];
 
 const KEYBOARD_MODES: [&str; 3] = ["none", "ondemand", "exclusive"];
 
@@ -37,8 +27,8 @@ pub fn build(
 ) -> SettingsPage {
     let page = adw::PreferencesPage::new();
 
-    let (vocab_group, sync_vocab) = build_vocab_group(saver, toast);
-    let provider_group = build_provider_group(saver, &sync_vocab);
+    let vocab_group = build_vocab_group(saver, toast);
+    let provider_group = build_provider_group(saver);
     let (behaviour_group, direct_inject_row) = build_behaviour_group(saver, ext_settings);
     let (streaming_group, streaming_expander) = build_streaming_group(saver);
     let history_group = build_history_group(saver);
@@ -56,12 +46,12 @@ pub fn build(
         page.add(&build_overlay_group(saver));
     }
 
-    SettingsPage { page, streaming_expander, direct_inject_row, sync_vocab }
+    SettingsPage { page, streaming_expander, direct_inject_row }
 }
 
 // ── Provider ─────────────────────────────────────────────────────────────────
 
-fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::PreferencesGroup {
+fn build_provider_group(saver: &AutoSaver) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Transcription Provider")
         .build();
@@ -69,11 +59,11 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
     let cfg = saver.config();
     let provider_row = adw::ComboRow::builder()
         .title("Provider")
-        .model(&gtk4::StringList::new(&["Groq", "Cohere", "Custom"]))
+        .model(&gtk4::StringList::new(&["Groq", "Custom"]))
         .build();
     // Set after construction: builder properties have no guaranteed order,
     // and `selected` is clamped against whatever model is present at the time.
-    provider_row.set_selected(provider_idx(&cfg.provider));
+    provider_row.set_selected(PROVIDERS.iter().position(|p| *p == cfg.provider).unwrap_or(0) as u32);
     let api_key_row = adw::PasswordEntryRow::builder()
         .title("API Key")
         .text(cfg.active_key())
@@ -101,9 +91,8 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
         let api_key_row = api_key_row.clone();
         let model_row = model_row.clone();
         let url_row = url_row.clone();
-        let sync_vocab = Rc::clone(sync_vocab);
         move |row| {
-            let provider = provider_str(row.selected());
+            let provider = PROVIDERS.get(row.selected() as usize).copied().unwrap_or("groq");
             saver.update(move |cfg| cfg.provider = provider.to_string());
             let (key, model) = {
                 let c = saver.config();
@@ -112,7 +101,6 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
             api_key_row.set_text(&key);
             model_row.set_text(&model);
             url_row.set_visible(provider == "custom");
-            sync_vocab();
         }
     });
 
@@ -121,9 +109,8 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
         move |row| {
             let t = row.text().to_string();
             saver.update(move |cfg| match cfg.provider.as_str() {
-                "groq"   => cfg.groq_api_key   = t.clone(),
-                "cohere" => cfg.cohere_api_key = t.clone(),
-                _        => cfg.custom_api_key = t.clone(),
+                "groq" => cfg.groq_api_key   = t.clone(),
+                _      => cfg.custom_api_key = t.clone(),
             });
         }
     });
@@ -133,9 +120,8 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
         move |row| {
             let t = row.text().to_string();
             saver.update(move |cfg| match cfg.provider.as_str() {
-                "groq"   => cfg.groq_model   = t.clone(),
-                "cohere" => cfg.cohere_model = t.clone(),
-                _        => cfg.custom_model = t.clone(),
+                "groq" => cfg.groq_model   = t.clone(),
+                _      => cfg.custom_model = t.clone(),
             });
         }
     });
@@ -168,10 +154,7 @@ fn build_provider_group(saver: &AutoSaver, sync_vocab: &Rc<dyn Fn()>) -> adw::Pr
 
 // ── Vocabulary ───────────────────────────────────────────────────────────────
 
-fn build_vocab_group(
-    saver: &AutoSaver,
-    toast: &adw::ToastOverlay,
-) -> (adw::PreferencesGroup, Rc<dyn Fn()>) {
+fn build_vocab_group(saver: &AutoSaver, toast: &adw::ToastOverlay) -> adw::PreferencesGroup {
     let group = adw::PreferencesGroup::builder()
         .title("Vocabulary")
         .description(
@@ -264,21 +247,6 @@ fn build_vocab_group(
         }
     });
 
-    // Shown only for Cohere + post-processing, where half of what the group
-    // description promises doesn't apply.
-    let cohere_note = gtk4::Label::builder()
-        .label(
-            "Cohere ignores the Whisper spelling hint, but post-processing \
-             still uses these terms.",
-        )
-        .halign(gtk4::Align::Start)
-        .wrap(true)
-        .xalign(0.0)
-        .visible(false)
-        .build();
-    cohere_note.add_css_class("caption");
-    cohere_note.add_css_class("dim-label");
-
     let reset = gtk4::Button::builder()
         .label("Reset to Default")
         .halign(gtk4::Align::End)
@@ -297,39 +265,11 @@ fn build_vocab_group(
         .build();
     vbox.append(&frame);
     vbox.append(&counter);
-    vbox.append(&cohere_note);
     vbox.append(&reset);
 
     group.add(&enable_row);
     group.add(&vbox);
-
-    // Cohere's endpoint documents no `prompt` field, so `active_prompt()`
-    // withholds the hint there. But `active_postprocess_system_prompt()` sends
-    // the list to the polish LLM regardless of provider — so the controls only
-    // do nothing at all when Cohere is selected *and* post-processing is off.
-    let sync: Rc<dyn Fn()> = {
-        let saver = saver.clone();
-        let group = group.clone();
-        Rc::new(move || {
-            let (cohere, postprocess) = {
-                let c = saver.config();
-                (c.provider == "cohere", c.postprocess_enabled)
-            };
-            let useful = !cohere || postprocess;
-            group.set_sensitive(useful);
-            group.set_tooltip_text(if useful {
-                None
-            } else {
-                Some(
-                    "Cohere's transcription endpoint accepts no vocabulary hint. \
-                     Turn on post-processing to use these terms there instead.",
-                )
-            });
-            cohere_note.set_visible(cohere && postprocess);
-        })
-    };
-    sync();
-    (group, sync)
+    group
 }
 
 // ── Behaviour ────────────────────────────────────────────────────────────────
@@ -422,86 +362,45 @@ fn build_behaviour_group(
 
 // ── Streaming ────────────────────────────────────────────────────────────────
 
-fn streaming_prov_idx(p: &str) -> u32 {
-    if p == "assemblyai" { 1 } else { 0 }
-}
-
 fn build_streaming_group(saver: &AutoSaver) -> (adw::PreferencesGroup, adw::ExpanderRow) {
     let group = adw::PreferencesGroup::new();
     let cfg = saver.config();
-    let is_dg = streaming_prov_idx(&cfg.streaming_provider) == 0;
 
     // The enable switch's handler lives in `pages::coupling`.
     let expander = adw::ExpanderRow::builder()
         .title("Real-Time Streaming")
-        .subtitle("WebSocket-based transcription with ~300 ms latency. Requires direct injection.")
+        .subtitle("Transcribes with Deepgram as you speak, ~300 ms latency. Requires direct injection.")
         .show_enable_switch(true)
         .enable_expansion(cfg.streaming_enabled)
         .build();
 
-    let provider_row = adw::ComboRow::builder()
-        .title("Provider")
-        .model(&gtk4::StringList::new(&["Deepgram", "AssemblyAI"]))
-        .build();
-    provider_row.set_selected(streaming_prov_idx(&cfg.streaming_provider));
-    let dg_key_row = adw::PasswordEntryRow::builder()
+    let key_row = adw::PasswordEntryRow::builder()
         .title("Deepgram API Key")
         .text(&cfg.deepgram_api_key)
-        .visible(is_dg)
         .build();
-    let dg_model_row = adw::EntryRow::builder()
+    let model_row = adw::EntryRow::builder()
         .title("Deepgram Model")
         .text(&cfg.deepgram_model)
-        .visible(is_dg)
-        .build();
-    let aai_key_row = adw::PasswordEntryRow::builder()
-        .title("AssemblyAI API Key")
-        .text(&cfg.assemblyai_api_key)
-        .visible(!is_dg)
         .build();
     drop(cfg);
 
-    provider_row.connect_selected_notify({
-        let dg_key = dg_key_row.clone();
-        let dg_model = dg_model_row.clone();
-        let aai_key = aai_key_row.clone();
-        let saver = saver.clone();
-        move |row| {
-            let is_dg = row.selected() == 0;
-            dg_key.set_visible(is_dg);
-            dg_model.set_visible(is_dg);
-            aai_key.set_visible(!is_dg);
-            let p = if is_dg { "deepgram" } else { "assemblyai" };
-            saver.update(move |cfg| cfg.streaming_provider = p.to_string());
-        }
-    });
-
-    dg_key_row.connect_changed({
+    key_row.connect_changed({
         let saver = saver.clone();
         move |row| {
             let t = row.text().to_string();
             saver.update(move |cfg| cfg.deepgram_api_key = t.clone());
         }
     });
-    dg_model_row.connect_changed({
+    model_row.connect_changed({
         let saver = saver.clone();
         move |row| {
             let t = row.text().to_string();
             saver.update(move |cfg| cfg.deepgram_model = t.clone());
         }
     });
-    aai_key_row.connect_changed({
-        let saver = saver.clone();
-        move |row| {
-            let t = row.text().to_string();
-            saver.update(move |cfg| cfg.assemblyai_api_key = t.clone());
-        }
-    });
 
-    expander.add_row(&provider_row);
-    expander.add_row(&dg_key_row);
-    expander.add_row(&dg_model_row);
-    expander.add_row(&aai_key_row);
+    expander.add_row(&key_row);
+    expander.add_row(&model_row);
     group.add(&expander);
     (group, expander)
 }

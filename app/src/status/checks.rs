@@ -104,15 +104,15 @@ fn check_extension_enabled() -> CheckResult {
 
 /// Checks every key the current configuration will actually use, mirroring
 /// the daemon's choice of path: streaming (only if post-processing is off)
-/// needs the streaming key instead of the batch key, and post-processing
+/// needs the Deepgram key instead of the batch key, and post-processing
 /// needs its own key on top.
 fn check_api_keys() -> CheckResult {
     let cfg = config::load().map_err(|e| format!("config.json could not be read: {e}"))?;
     let streaming = cfg.streaming_enabled && !cfg.postprocess_enabled;
     let mut missing = Vec::new();
     if streaming {
-        if cfg.active_streaming_key().is_empty() {
-            missing.push("streaming");
+        if cfg.deepgram_api_key.is_empty() {
+            missing.push("Deepgram");
         }
     } else if cfg.active_key().is_empty() {
         missing.push("transcription");

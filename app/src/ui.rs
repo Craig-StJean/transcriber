@@ -62,3 +62,21 @@ pub fn reset_buffer_with_undo(
     let buffer = buffer.clone();
     undo_toast(overlay, &format!("{what} reset to default"), move || buffer.set_text(&previous), || {});
 }
+
+/// "5 min ago"-style age of a Unix timestamp; empty for 0 (unknown).
+pub fn format_timestamp(ts: i64) -> String {
+    if ts == 0 {
+        return String::new();
+    }
+    let elapsed = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH + std::time::Duration::from_secs(ts as u64))
+        .unwrap_or_default()
+        .as_secs();
+    let plural = |n: u64, unit: &str| format!("{n} {unit}{} ago", if n == 1 { "" } else { "s" });
+    match elapsed {
+        0..=59       => "just now".into(),
+        60..=3599    => format!("{} min ago", elapsed / 60),
+        3600..=86399 => format!("{} hr ago", elapsed / 3600),
+        s            => plural(s / 86400, "day"),
+    }
+}

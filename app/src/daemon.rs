@@ -13,6 +13,10 @@ pub const SHORT_TIMEOUT_MS: i32 = 5_000;
 /// a long recording on a slow provider can legitimately take minutes.
 pub const RETRY_TIMEOUT_MS: i32 = 5 * 60 * 1_000;
 
+/// `RepolishEntry` is one chat-completion call, but a slow or queued model
+/// can still take a while.
+pub const REPOLISH_TIMEOUT_MS: i32 = 2 * 60 * 1_000;
+
 pub async fn call(
     method: &str,
     params: Option<glib::Variant>,

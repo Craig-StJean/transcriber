@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet};
 use std::rc::{Rc, Weak};
 
@@ -31,8 +31,16 @@ struct Inner {
     /// daemon is told. Hidden rather than removed so Undo is instant.
     pending:       RefCell<HashSet<i64>>,
     db:            RefCell<HistoryDb>,
-    /// Lowercased search text.
-    needle:        RefCell<String>,
+    /// Search text as typed; empty means the normal, most-recent list.
+    query:         RefCell<String>,
+    /// The query the current rows were loaded for. Differs from `query`
+    /// while a search is in flight.
+    shown_query:   RefCell<String>,
+    /// Bumped per load so a slow search can't overwrite a newer result.
+    load_gen:      Cell<u32>,
+    /// Whether the unfiltered list had anything in it, for Clear All while
+    /// only search results are shown.
+    has_history:   Cell<bool>,
     toast:         adw::ToastOverlay,
     saver:         AutoSaver,
     hotkey:        Option<String>,
@@ -102,10 +110,17 @@ impl HistoryPage {
         });
         i.search_entry.connect_search_changed({
             let weak = Rc::downgrade(i);
+            // Already debounced by the entry's `search-delay`, except that
+            // clearing it fires at once — which is what restoring the normal
+            // list wants.
             move |e| {
                 let Some(inner) = weak.upgrade() else { return };
-                *inner.needle.borrow_mut() = e.text().to_lowercase();
-                HistoryPage { inner }.update_visibility();
+                let query = e.text().trim().to_string();
+                if *inner.query.borrow() == query {
+                    return;
+                }
+                *inner.query.borrow_mut() = query;
+                HistoryPage { inner }.refresh();
             }
         });
 
@@ -144,13 +159,37 @@ impl HistoryPage {
         });
     }
 
-    /// Bring the list in line with the database, touching only rows that are
+    /// Re-read the database: the most recent entries, or — while searching —
+    /// every match in the whole table, which is queried on a worker thread
+    /// since it scans rather than reading the newest few hundred rows.
+    pub fn refresh(&self) {
+        let i = &self.inner;
+        let gen = i.load_gen.get().wrapping_add(1);
+        i.load_gen.set(gen);
+        let query = i.query.borrow().clone();
+        if query.is_empty() {
+            let entries = i.db.borrow_mut().load();
+            self.apply(entries, query);
+            return;
+        }
+        let weak = Rc::downgrade(&self.inner);
+        glib::spawn_future_local(async move {
+            let q = query.clone();
+            let Ok(entries) = gio::spawn_blocking(move || db::search(&q)).await else { return };
+            let Some(inner) = weak.upgrade() else { return };
+            if inner.load_gen.get() == gen {
+                HistoryPage { inner }.apply(entries, query);
+            }
+        });
+    }
+
+    /// Bring the list in line with `entries`, touching only rows that are
     /// new or whose content changed. Rebuilding everything would stop any
     /// playing recording and reset every polished/original toggle each time a
     /// transcription landed.
-    pub fn refresh(&self) {
+    fn apply(&self, entries: Vec<db::HistoryEntry>, query: String) {
         let i = &self.inner;
-        let entries = i.db.borrow_mut().load();
+        *i.shown_query.borrow_mut() = query;
         let by_id: HashMap<i64, &db::HistoryEntry> = entries.iter().map(|e| (e.id, e)).collect();
 
         let mut rows = i.rows.borrow_mut();
@@ -161,8 +200,6 @@ impl HistoryPage {
             }
             keep
         });
-        // A committed delete is finished once the row is gone from the DB.
-        i.pending.borrow_mut().retain(|id| by_id.contains_key(id));
 
         // Kept rows are already in descending-id order, so walking the fresh
         // list and inserting whatever isn't next in line restores the order.
@@ -216,25 +253,25 @@ impl HistoryPage {
     fn update_visibility(&self) {
         let i = &self.inner;
         let pending = i.pending.borrow();
-        let needle = i.needle.borrow();
-        let mut any_entry = false;
         let mut any_visible = false;
         for h in i.rows.borrow().iter() {
-            let deleted = pending.contains(&h.entry.id);
-            let visible = !deleted && h.entry.matches(&needle);
+            let visible = !pending.contains(&h.entry.id);
             h.row.set_visible(visible);
-            any_entry |= !deleted;
             any_visible |= visible;
         }
 
-        i.clear_btn.set_sensitive(any_entry);
-        let page = if !any_entry {
-            self.update_empty_state();
-            "empty"
-        } else if !any_visible {
+        let searching = !i.shown_query.borrow().is_empty();
+        if !searching {
+            i.has_history.set(any_visible);
+        }
+        i.clear_btn.set_sensitive(i.has_history.get());
+        let page = if any_visible {
+            "list"
+        } else if searching {
             "no-results"
         } else {
-            "list"
+            self.update_empty_state();
+            "empty"
         };
         i.stack.set_visible_child_name(page);
     }
@@ -299,9 +336,21 @@ impl HistoryPage {
             .await;
             let Some(inner) = weak.upgrade() else { return };
             let page = HistoryPage { inner };
-            if let Err(e) = result {
-                page.inner.pending.borrow_mut().remove(&id);
-                ui::toast(&page.inner.toast, &format!("Couldn't delete: {}", daemon::error_message(&e)));
+            // Done either way: on success the row is dropped here rather than
+            // left for the next load, which a search result list might never
+            // include again.
+            page.inner.pending.borrow_mut().remove(&id);
+            match result {
+                Ok(_) => page.inner.rows.borrow_mut().retain(|h| {
+                    let keep = h.entry.id != id;
+                    if !keep {
+                        page.inner.list_box.remove(&h.row);
+                    }
+                    keep
+                }),
+                Err(e) => {
+                    ui::toast(&page.inner.toast, &format!("Couldn't delete: {}", daemon::error_message(&e)));
+                }
             }
             page.refresh();
         });
@@ -392,6 +441,8 @@ fn build_inner(
         .placeholder_text("Search transcriptions")
         .hexpand(true)
         .build();
+    // The debounce for searching the database; GTK's default is 150 ms.
+    search_entry.set_property("search-delay", 200u32);
     let search_clamp = adw::Clamp::builder().maximum_size(400).child(&search_entry).build();
     let search_bar = gtk4::SearchBar::builder().child(&search_clamp).build();
     search_bar.connect_entry(&search_entry);
@@ -423,7 +474,10 @@ fn build_inner(
         rows: RefCell::new(Vec::new()),
         pending: RefCell::new(HashSet::new()),
         db: RefCell::new(HistoryDb::default()),
-        needle: RefCell::new(String::new()),
+        query: RefCell::new(String::new()),
+        shown_query: RefCell::new(String::new()),
+        load_gen: Cell::new(0),
+        has_history: Cell::new(false),
         toast: toast.clone(),
         saver: saver.clone(),
         hotkey,

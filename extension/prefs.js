@@ -55,7 +55,7 @@ export default class TranscriberPreferences extends ExtensionPreferences {
         const row = new Adw.ActionRow({ title, subtitle, activatable: true });
 
         const label = new ShortcutLabel({
-            disabled_text: 'Not set',
+            disabled_text: 'Disabled',
             valign: Gtk.Align.CENTER,
         });
 
