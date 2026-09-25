@@ -1,6 +1,18 @@
 import Gio from 'gi://Gio';
+import GLib from 'gi://GLib';
 
-const DBUS_XML = `
+export const BUS_NAME    = 'org.transcriber.Daemon';
+export const OBJECT_PATH = '/org/transcriber/Daemon';
+export const INTERFACE   = 'org.transcriber.Daemon';
+
+/**
+ * The subset of the daemon's interface the extension uses. Kept here as the
+ * reference for the signal/method signatures handled in extension.js; the
+ * extension talks to the bus directly (Gio.DBusConnection.call /
+ * signal_subscribe) so that method calls can DBus-activate the daemon and
+ * signals can be pinned to the daemon's unique bus name.
+ */
+export const INTERFACE_XML = `
 <node>
   <interface name="org.transcriber.Daemon">
     <method name="StartRecording"/>
@@ -19,34 +31,64 @@ const DBUS_XML = `
     <signal name="TranscriptionChunk">
       <arg type="s" name="text"/>
     </signal>
+    <signal name="ErrorOccurred">
+      <arg type="s" name="message"/>
+    </signal>
   </interface>
 </node>`;
 
-const DaemonProxyClass = Gio.DBusProxy.makeProxyWrapper(DBUS_XML);
+/**
+ * Call a no-argument daemon method.
+ *
+ * Unless `autoStart` is false the call is sent without NO_AUTO_START, so the
+ * bus will DBus-activate transcriber-daemon if it isn't running yet.
+ *
+ * @returns {Promise<GLib.Variant>}
+ */
+export function callDaemon(method, cancellable, { autoStart = true } = {}) {
+    return new Promise((resolve, reject) => {
+        Gio.DBus.session.call(
+            BUS_NAME, OBJECT_PATH, INTERFACE, method,
+            null, null,
+            autoStart ? Gio.DBusCallFlags.NONE : Gio.DBusCallFlags.NO_AUTO_START,
+            -1,
+            cancellable,
+            (conn, res) => {
+                try {
+                    resolve(conn.call_finish(res));
+                } catch (e) {
+                    reject(e);
+                }
+            });
+    });
+}
 
 /**
- * Create a DBus proxy for the daemon.
+ * Read the daemon's CurrentState property. Never auto-starts the daemon.
  *
- * Returns a Promise that resolves to the proxy, or rejects if the daemon is
- * not reachable.  The promise resolves even if the daemon is not currently
- * running — method calls will simply fail until it starts.
+ * @returns {Promise<string>}
  */
-export function createDaemonProxy() {
+export function getCurrentState(cancellable) {
     return new Promise((resolve, reject) => {
-        try {
-            new DaemonProxyClass(
-                Gio.DBus.session,
-                'org.transcriber.Daemon',
-                '/org/transcriber/Daemon',
-                (proxy, error) => {
-                    if (error) reject(error);
-                    else resolve(proxy);
-                },
-                null,
-                Gio.DBusProxyFlags.DO_NOT_AUTO_START,
-            );
-        } catch (e) {
-            reject(e);
-        }
+        Gio.DBus.session.call(
+            BUS_NAME, OBJECT_PATH, 'org.freedesktop.DBus.Properties', 'Get',
+            new GLib.Variant('(ss)', [INTERFACE, 'CurrentState']),
+            new GLib.VariantType('(v)'),
+            Gio.DBusCallFlags.NO_AUTO_START,
+            -1,
+            cancellable,
+            (conn, res) => {
+                try {
+                    const [value] = conn.call_finish(res).recursiveUnpack();
+                    resolve(value);
+                } catch (e) {
+                    reject(e);
+                }
+            });
     });
+}
+
+export function isCancelledError(e) {
+    return e instanceof GLib.Error &&
+        e.matches(Gio.IOErrorEnum, Gio.IOErrorEnum.CANCELLED);
 }

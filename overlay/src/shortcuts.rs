@@ -6,6 +6,9 @@ use futures_util::StreamExt;
 
 use crate::daemon_proxy::DaemonProxy;
 
+/// Default toggle hotkey (Super+apostrophe), matching the GNOME extension.
+const TOGGLE_TRIGGER: &str = "LOGO+apostrophe";
+
 /// Register "toggle-recording" and "cancel-recording" via the XDG GlobalShortcuts
 /// portal, then loop forever forwarding activations to daemon method calls.
 ///
@@ -13,8 +16,11 @@ use crate::daemon_proxy::DaemonProxy;
 /// the shortcuts are persisted by the portal across reboots.
 ///
 /// Returns an error if the portal is unavailable (e.g. no xdg-desktop-portal
-/// running).  The caller should log the error and continue without hotkeys —
-/// the overlay will still respond to daemon DBus signals.
+/// running).  The caller runs this as its own task, so a failure only loses
+/// the hotkeys — the overlay still follows daemon DBus signals.
+///
+/// `proxy` addresses the daemon by its well-known name, so it stays valid
+/// across daemon restarts (a call while it's down DBus-activates it).
 pub async fn run(proxy: DaemonProxy<'static>, current_state: Arc<Mutex<String>>) -> Result<()> {
     let gs = GlobalShortcuts::new()
         .await
@@ -27,7 +33,14 @@ pub async fn run(proxy: DaemonProxy<'static>, current_state: Arc<Mutex<String>>)
     gs.bind_shortcuts(
         &session,
         &[
-            NewShortcut::new("toggle-recording", "Toggle Recording"),
+            // Trigger strings follow the XDG "shortcuts" spec used by the
+            // portal: modifiers (CTRL, ALT, SHIFT, NUM, LOGO) joined with `+`
+            // to an xkb keysym name. This is only a proposal — the portal's
+            // dialog lets the user pick something else.
+            NewShortcut::new("toggle-recording", "Toggle Recording")
+                .preferred_trigger(TOGGLE_TRIGGER),
+            // No proposal for cancel: a global Escape would swallow the key
+            // in every other application.
             NewShortcut::new("cancel-recording", "Cancel Recording"),
         ],
         None,

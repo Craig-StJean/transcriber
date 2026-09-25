@@ -6,7 +6,8 @@ mod dbus;
 mod streaming;
 
 use anyhow::Result;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -36,15 +37,15 @@ async fn main() -> Result<()> {
 
     let db = Arc::new(db::Database::open()?);
 
-    let iface = dbus::TranscriberInterface {
-        state:           Arc::new(Mutex::new(dbus::DaemonState::Idle)),
-        config:          Arc::new(Mutex::new(cfg)),
-        audio_buf:       Arc::new(Mutex::new(None)),
-        stop_tx:         Arc::new(Mutex::new(None)),
-        stream_audio_tx: Arc::new(Mutex::new(None)),
-        http_client:     reqwest::Client::new(),
-        db,
-    };
+    // reqwest has no timeouts by default, so a stalled connection would leave
+    // the daemon in Transcribing forever. 120 s covers uploading a
+    // max-length recording on a slow uplink plus the provider's processing.
+    let http_client = reqwest::Client::builder()
+        .connect_timeout(Duration::from_secs(10))
+        .timeout(Duration::from_secs(120))
+        .build()?;
+
+    let iface = dbus::TranscriberInterface::new(cfg, http_client, db);
 
     let _conn = dbus::build_connection(iface).await?;
 

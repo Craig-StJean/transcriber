@@ -11,7 +11,10 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: fedora:latest
+      # Oldest Fedora the project supports: the settings app needs
+      # libadwaita 1.9 (GNOME 50), first shipped in Fedora 44. Pinned so a new
+      # Fedora release can't silently raise the glibc/GTK floor of the binaries.
+      image: fedora:44
 
     steps:
       - name: Install system dependencies
@@ -19,20 +22,29 @@ jobs:
           dnf install -y \
             gcc git \
             alsa-lib-devel gtk4-devel libadwaita-devel \
-            blueprint-compiler glib2-devel \
-            gtk4-layer-shell-devel
+            glib2-devel gtk4-layer-shell-devel
 
       - uses: actions/checkout@v4
 
+      - name: Check tag matches workspace version
+        run: |
+          CARGO_VERSION="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          if [ "${GITHUB_REF_NAME#v}" != "$CARGO_VERSION" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} does not match Cargo.toml version ${CARGO_VERSION}"
+            exit 1
+          fi
+
+      # rustup honours rust-toolchain.toml, so the first cargo call installs
+      # the pinned toolchain (with clippy + rustfmt).
       - name: Install Rust toolchain
         run: |
-          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
           echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
 
       - name: Build release binaries
         run: |
           source "$HOME/.cargo/env"
-          cargo build --release \
+          cargo build --release --locked \
             -p transcriber-daemon \
             -p transcriber-settings \
             -p transcriber-overlay
@@ -47,19 +59,22 @@ jobs:
           cp target/release/transcriber-settings  "${STAGING}/bin/"
           cp target/release/transcriber-overlay   "${STAGING}/bin/"
 
-          cp deploy/*.service deploy/*.desktop          "${STAGING}/deploy/"
-          cp deploy/*.timer                             "${STAGING}/deploy/" 2>/dev/null || true
+          cp deploy/*.service deploy/*.desktop deploy/*.timer "${STAGING}/deploy/"
 
-          cp -r extension/*                             "${STAGING}/extension/"
+          cp -r extension/.                             "${STAGING}/extension/"
           cp scripts/check-update.sh                    "${STAGING}/scripts/"
 
           echo "${VERSION}" > "${STAGING}/VERSION"
 
           tar czf "transcriber-${VERSION}.tar.gz" "${STAGING}"
+          # Installers refuse a tarball that doesn't match this file.
+          sha256sum "transcriber-${VERSION}.tar.gz" > SHA256SUMS
           echo "TARBALL=transcriber-${VERSION}.tar.gz" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
-          files: ${{ env.TARBALL }}
+          files: |
+            ${{ env.TARBALL }}
+            SHA256SUMS
           generate_release_notes: true

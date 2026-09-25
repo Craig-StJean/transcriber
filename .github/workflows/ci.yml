@@ -1,0 +1,70 @@
+name: CI
+
+# Lint + test gate for every push and PR. The Nix workflow (nix.yml) builds
+# the flake; this one checks formatting, clippy and tests with the same
+# system packages the Fedora release build uses (see release.yml).
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    container:
+      image: fedora:44
+
+    steps:
+      - name: Install system dependencies
+        run: |
+          dnf install -y \
+            gcc git \
+            alsa-lib-devel gtk4-devel libadwaita-devel \
+            glib2-devel gtk4-layer-shell-devel
+
+      - uses: actions/checkout@v4
+
+      # rustup honours rust-toolchain.toml (pinned version + clippy/rustfmt).
+      - name: Install Rust toolchain
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
+          echo "$HOME/.cargo/bin" >> "$GITHUB_PATH"
+
+      # No `cargo fmt --check`: the codebase hand-aligns `=` and match arms
+      # into columns, which rustfmt would flatten.
+
+      - name: cargo clippy
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+      - name: cargo test
+        run: cargo test --workspace --locked
+
+  extension:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The config lives in .github/ so it isn't shipped with the extension;
+      # installing next to it lets its `@eslint/js` import resolve.
+      - name: eslint
+        run: |
+          npm install --no-save --no-package-lock --prefix .github eslint@9 @eslint/js@9
+          .github/node_modules/.bin/eslint --config .github/eslint.config.mjs extension/
+
+  shell:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shellcheck
+        run: shellcheck install.sh install-remote.sh update.sh scripts/*.sh

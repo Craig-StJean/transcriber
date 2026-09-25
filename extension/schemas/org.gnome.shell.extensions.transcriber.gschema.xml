@@ -17,7 +17,19 @@
     <key name="cancel-recording" type="as">
       <default><![CDATA[['Escape']]]></default>
       <summary>Cancel recording</summary>
-      <description>Accelerator to cancel an in-progress recording without transcribing</description>
+      <description>Accelerator to cancel an in-progress recording or transcription. Only grabbed while one is in progress, so it does not steal the key from other applications the rest of the time.</description>
+    </key>
+
+    <key name="repaste-last" type="as">
+      <default><![CDATA[[]]]></default>
+      <summary>Re-paste last transcription</summary>
+      <description>Accelerator to paste (or type, with direct injection) the most recent transcription again. Unbound by default.</description>
+    </key>
+
+    <key name="push-to-talk" type="b">
+      <default>false</default>
+      <summary>Push-to-talk</summary>
+      <description>Record only while the toggle-recording shortcut is held: pressing it starts recording and releasing it stops. Release is detected from the shortcut's modifier keys, so the shortcut must include a modifier (e.g. Super); without one, the shortcut toggles as usual.</description>
     </key>
 
     <key name="auto-paste" type="b">

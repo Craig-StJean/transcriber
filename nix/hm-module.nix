@@ -14,7 +14,45 @@ let
     Exec=${pkgs.coreutils}/bin/true
     SystemdService=transcriber-daemon.service
   '';
+
+  # The daemon's sandbox (ProtectSystem=strict) leaves $HOME read-only except
+  # its two ReadWritePaths, so create those — and carry over the pre-rename
+  # "voice-transcriber" dirs — outside the sandbox ("+" prefix) before start.
+  prepareDirs = pkgs.writeShellScript "transcriber-prepare-dirs" ''
+    set -eu
+    for d in "$HOME/.config" "$HOME/.local/share"; do
+      if [ -d "$d/voice-transcriber" ] && [ ! -e "$d/transcriber" ]; then
+        ${pkgs.coreutils}/bin/mv "$d/voice-transcriber" "$d/transcriber"
+      fi
+      ${pkgs.coreutils}/bin/mkdir -p "$d/transcriber"
+    done
+  '';
+
+  # Merges the declared `config` attrs onto the existing config.json (declared
+  # fields win, recursively), keeping it a regular 0600 file the settings GUI
+  # can still save to. Replaces a store symlink left by older versions of
+  # this module.
+  declaredConfig = pkgs.writeText "transcriber-config.json" (builtins.toJSON cfg.config);
+  mergeConfig = pkgs.writeShellScript "transcriber-merge-config" ''
+    set -eu
+    dir="$1"
+    file="$dir/config.json"
+    ${pkgs.coreutils}/bin/mkdir -p "$dir"
+    existing='{}'
+    if [ -f "$file" ]; then
+      # Unparseable file degrades to {} rather than failing activation.
+      existing="$(${pkgs.jq}/bin/jq -c '.' "$file" 2>/dev/null || true)"
+      [ -n "$existing" ] || existing='{}'
+    fi
+    tmp="$(${pkgs.coreutils}/bin/mktemp "$dir/.config.json.XXXXXX")"   # mode 0600
+    trap '${pkgs.coreutils}/bin/rm -f -- "$tmp"' EXIT
+    printf '%s' "$existing" \
+      | ${pkgs.jq}/bin/jq -s '.[0] * .[1]' - ${declaredConfig} > "$tmp"
+    ${pkgs.coreutils}/bin/mv -f "$tmp" "$file"
+    trap - EXIT
+  '';
 in {
+
   options.programs.transcriber = {
     enable = lib.mkEnableOption "transcriber (voice-to-text daemon + Wayland overlay)";
 
@@ -56,12 +94,14 @@ in {
     };
 
     waylandDisplay = lib.mkOption {
-      type = lib.types.str;
-      default = "wayland-1";
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      visible = false;
       description = ''
-        Value of WAYLAND_DISPLAY exported into the daemon and overlay services.
-        Hyprland's default socket is wayland-1; Sway / GNOME typically use
-        wayland-0. Run `echo $WAYLAND_DISPLAY` inside your session to check.
+        Deprecated and ignored. The units now inherit WAYLAND_DISPLAY from
+        the session environment that the compositor imports into the systemd
+        user manager (home-manager's Hyprland/Sway modules, uwsm and KDE all
+        do this).
       '';
     };
 
@@ -77,17 +117,28 @@ in {
         }
       '';
       description = ''
-        Declarative contents of ~/.config/transcriber/config.json.
-        Leave null to let the daemon write its own defaults on first run,
-        or to manage the file via the settings GUI. Note: if you set this,
-        edits made through the settings GUI will be overwritten on the next
-        home-manager switch.
+        Fields to merge into ~/.config/transcriber/config.json on every
+        home-manager switch. The merge is recursive and the declared values
+        win; every field you don't declare keeps whatever is on disk, so
+        settings changed in the GUI survive unless they are declared here.
+        The file stays a regular, writable file (mode 0600), created if
+        missing. Leave null to leave the file entirely to the daemon and GUI.
+
+        These values are copied into the world-readable Nix store, so don't
+        put API keys here — write them from a secret file in your own
+        activation script instead.
       '';
     };
   };
 
   config = lib.mkIf cfg.enable {
     home.packages = [ cfg.package ];
+
+    warnings = lib.optional (cfg.waylandDisplay != null) ''
+      programs.transcriber.waylandDisplay is deprecated and ignored: the
+      services now inherit WAYLAND_DISPLAY from the session environment.
+      Remove it from your configuration.
+    '';
 
     # DBus activation: lets the daemon start on first method call (e.g. the
     # Hyprland hotkey bound to `dbus-send ... StartRecording`) without having
@@ -105,13 +156,19 @@ in {
       Service = {
         Type = "dbus";
         BusName = "org.transcriber.Daemon";
+        ExecStartPre = "+${prepareDirs}";
         ExecStart = "${cfg.package}/bin/transcriber-daemon";
         Restart = "on-failure";
         RestartSec = 3;
-        Environment = [
-          "RUST_LOG=info"
-          "WAYLAND_DISPLAY=${cfg.waylandDisplay}"
-        ];
+        Environment = [ "RUST_LOG=info" ];
+
+        # Hardening. No ProtectHome: audio goes through PipeWire/PulseAudio
+        # sockets under $XDG_RUNTIME_DIR, and the config/data dirs are in $HOME.
+        NoNewPrivileges = true;
+        PrivateTmp = true;
+        ProtectSystem = "strict";
+        ReadWritePaths = [ "%h/.config/transcriber" "%h/.local/share/transcriber" ];
+        RestrictAddressFamilies = "AF_UNIX AF_INET AF_INET6 AF_NETLINK";
       };
       Install = lib.mkIf cfg.autostart {
         WantedBy = [ "graphical-session.target" ];
@@ -129,12 +186,13 @@ in {
       Service = {
         Type = "simple";
         ExecStart = "${cfg.package}/bin/transcriber-overlay";
+        # Exits 0 without wlr-layer-shell, so this can't restart-loop on GNOME.
         Restart = "on-failure";
         RestartSec = 3;
-        Environment = [
-          "RUST_LOG=info"
-          "WAYLAND_DISPLAY=${cfg.waylandDisplay}"
-        ];
+        Environment = [ "RUST_LOG=info" ];
+        # Kept minimal: needs the Wayland socket, the session bus and the
+        # virtual-keyboard protocol for direct text injection.
+        NoNewPrivileges = true;
       };
       Install = lib.mkIf cfg.autostart {
         WantedBy = [ "graphical-session.target" ];
@@ -159,8 +217,11 @@ in {
     };
 
     # ── Optional declarative config.json ───────────────────────────────────
-    xdg.configFile."transcriber/config.json" = lib.mkIf (cfg.config != null) {
-      text = builtins.toJSON cfg.config;
-    };
+    # Merged onto the live file rather than linked from the store, so the
+    # settings GUI can keep saving to it. See the `config` option.
+    home.activation.transcriberConfig = lib.mkIf (cfg.config != null)
+      (lib.hm.dag.entryAfter [ "writeBoundary" ] ''
+        run ${mergeConfig} ${lib.escapeShellArg "${config.xdg.configHome}/transcriber"}
+      '');
   };
 }

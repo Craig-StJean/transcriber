@@ -10,14 +10,19 @@ PartOf=graphical-session.target
 [Service]
 Type=simple
 ExecStart=%h/.local/bin/transcriber-overlay
+# The overlay exits with status 0 when the compositor lacks wlr-layer-shell
+# (e.g. GNOME), so this does not restart-loop there.
 Restart=on-failure
 RestartSec=3s
 
-# GTK4 + gtk4-layer-shell need a live Wayland display.
-# WAYLAND_DISPLAY is hardcoded here as a safe default; adjust if your
-# compositor uses a different socket (e.g. wayland-1).
+# WAYLAND_DISPLAY comes from the session environment the compositor imports
+# into the systemd user manager (uwsm, KDE and GNOME do this; on Sway add
+# `exec systemctl --user import-environment WAYLAND_DISPLAY` to its config).
 Environment=RUST_LOG=info
-Environment=WAYLAND_DISPLAY=wayland-0
+
+# Kept minimal: the overlay needs the Wayland socket, the session bus and the
+# virtual-keyboard protocol for direct text injection.
+NoNewPrivileges=yes
 
 [Install]
 WantedBy=graphical-session.target

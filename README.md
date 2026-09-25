@@ -22,7 +22,7 @@ The project has four components communicating over DBus:
 
 | Component | Language | Role |
 |-----------|----------|------|
-| **Daemon** | Rust | Headless service — audio capture, API calls, clipboard injection, history DB |
+| **Daemon** | Rust | Headless service — audio capture, API calls, history DB |
 | **Settings App** | Rust + GTK4/Libadwaita | GUI for configuration and transcription history |
 | **Overlay** | Rust + GTK4 (`gtk4-layer-shell`) | On-screen VU meter for wlroots/KDE compositors (Hyprland, Sway, Plasma) |
 | **GNOME Extension** | JavaScript (GJS) | Hotkey binding and on-screen overlay for GNOME Shell |
@@ -104,7 +104,10 @@ Full guide: [docs/hyprland.md](docs/hyprland.md). Short version:
   imports = [ inputs.transcriber.homeManagerModules.default ];
   programs.transcriber = {
     enable = true;
-    waylandDisplay = "wayland-1";
+    # Optional: fields merged onto ~/.config/transcriber/config.json at each
+    # switch. Declared fields win; everything else stays GUI-editable. Values
+    # land in the world-readable Nix store, so don't put API keys here.
+    # config = { vad_enabled = true; };
   };
 }
 ```
@@ -179,8 +182,11 @@ gnome-extensions list
 gnome-extensions enable transcriber@local
 ```
 
-**Clipboard not populated after transcription:**
-The daemon requires `WAYLAND_DISPLAY` to be set. This is handled automatically by the systemd service. If running manually, ensure `WAYLAND_DISPLAY=wayland-0` is set in your environment.
+**Overlay can't reach the compositor (wlroots):**
+The units no longer hard-code `WAYLAND_DISPLAY`; they inherit it from the session. Hyprland's home-manager module, uwsm and KDE export it already. On Sway, add `exec systemctl --user import-environment WAYLAND_DISPLAY` to your config.
+
+**Services are sandboxed:**
+The daemon unit uses `ProtectSystem=strict`; only `~/.config/transcriber` and `~/.local/share/transcriber` are writable.
 
 **Audio not captured:**
 Check that your user has access to the audio device:

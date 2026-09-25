@@ -6,15 +6,18 @@
 #   # With gh CLI already authenticated:
 #   bash install-remote.sh
 #
-#   # With a GitHub token:
-#   GITHUB_TOKEN=ghp_xxx bash install-remote.sh
+#   # With a GitHub token (not stored):
+#   GITHUB_TOKEN=github_pat_xxx bash install-remote.sh
+#
+# Auto-updates use either ~/.config/transcriber/github-token (a fine-grained,
+# read-only token — written only when you paste one at the prompt below) or
+# `gh auth token` at run time. The gh token itself is never written to disk.
 #
 #   # Install a specific version:
 #   VERSION=v0.2.0 bash install-remote.sh
 set -euo pipefail
 
 REPO="Craig-StJean/transcriber"
-APP_NAME="transcriber"
 
 BIN_DIR="$HOME/.local/bin"
 SYSTEMD_DIR="$HOME/.config/systemd/user"
@@ -48,56 +51,72 @@ fi
 # ── Install runtime dependencies ─────────────────────────────────────────────
 
 info "Installing runtime dependencies (may prompt for sudo)..."
-sudo dnf install -y gtk4 libadwaita glib2 alsa-lib glib2-devel >/dev/null 2>&1 || {
+sudo dnf install -y gtk4 libadwaita glib2 alsa-lib glib2-devel gtk4-layer-shell jq >/dev/null 2>&1 || {
     warn "Some packages may not have installed. Continuing..."
 }
 ok "system dependencies"
 
+for tool in curl jq sha256sum tar; do
+    command -v "$tool" &>/dev/null || err "$tool is required but not installed."
+done
+
 # ── Resolve GitHub authentication ────────────────────────────────────────────
 
+TOKEN_FILE="$CONFIG_DIR/github-token"
+
 resolve_auth() {
-    # 1. Env var
+    local gh_token=""
+    if command -v gh &>/dev/null && gh auth status &>/dev/null; then
+        gh_token="$(gh auth token 2>/dev/null)" || gh_token=""
+    fi
+
+    # Older installers stored a copy of the full-scope gh token. Remove it;
+    # gh is asked at run time instead.
+    if [[ -f "$TOKEN_FILE" && -n "$gh_token" && "$(cat "$TOKEN_FILE")" == "$gh_token" ]]; then
+        rm -f -- "$TOKEN_FILE"
+        warn "removed stored copy of your gh CLI token (auto-updates now ask gh directly)"
+    fi
+
+    # 1. Env var (used for this run only, never stored)
     if [[ -n "${GITHUB_TOKEN:-}" ]]; then
         return 0
     fi
 
-    # 2. Stored token from previous install
-    local token_file="$CONFIG_DIR/github-token"
-    if [[ -f "$token_file" ]]; then
-        GITHUB_TOKEN="$(cat "$token_file")"
+    # 2. User-provided fine-grained token from a previous install
+    if [[ -f "$TOKEN_FILE" ]]; then
+        GITHUB_TOKEN="$(cat "$TOKEN_FILE")"
         return 0
     fi
 
-    # 3. gh CLI
-    if command -v gh &>/dev/null && gh auth status &>/dev/null 2>&1; then
-        GITHUB_TOKEN="$(gh auth token 2>/dev/null)" || true
-        if [[ -n "${GITHUB_TOKEN:-}" ]]; then
-            return 0
-        fi
+    # 3. gh CLI (read at use time, never stored)
+    if [[ -n "$gh_token" ]]; then
+        GITHUB_TOKEN="$gh_token"
+        return 0
     fi
 
-    # 4. Interactive prompt
+    # 4. Interactive prompt — stored for auto-updates, readable only by you
     echo ""
     echo -e "${yellow}This is a private repository. A GitHub token with repo read access is required.${reset}"
     echo "Create one at: https://github.com/settings/tokens"
     echo "(Select: Fine-grained → Only select repositories → ${REPO} → Contents: Read-only)"
     echo ""
-    read -rp "GitHub token: " GITHUB_TOKEN
+    read -rsp "GitHub token: " GITHUB_TOKEN
+    echo ""
     if [[ -z "$GITHUB_TOKEN" ]]; then
         err "No token provided. Cannot continue."
     fi
+    mkdir -p "$CONFIG_DIR"
+    (umask 077; printf '%s\n' "$GITHUB_TOKEN" > "$TOKEN_FILE")
+    ok "token saved to $TOKEN_FILE (mode 0600) for auto-updates"
 }
 
 resolve_auth
 
-# Store token for auto-updates
-mkdir -p "$CONFIG_DIR"
-echo "$GITHUB_TOKEN" > "$CONFIG_DIR/github-token"
-chmod 600 "$CONFIG_DIR/github-token"
-
+# The Authorization header is fed through a file descriptor so the token
+# never appears in the process list.
 gh_api() {
     curl -fsSL \
-        -H "Authorization: token $GITHUB_TOKEN" \
+        -H @<(printf 'Authorization: Bearer %s\n' "$GITHUB_TOKEN") \
         -H "Accept: application/vnd.github+json" \
         "$@"
 }
@@ -114,12 +133,8 @@ fi
 
 RELEASE_JSON="$(gh_api "$RELEASE_URL")" || err "Failed to query GitHub API. Check your token and network."
 
-TAG_NAME="$(echo "$RELEASE_JSON" | grep -oP '"tag_name"\s*:\s*"\K[^"]+')"
-ASSET_URL="$(echo "$RELEASE_JSON" | grep -oP '"browser_download_url"\s*:\s*"\K[^"]+\.tar\.gz')"
-
-if [[ -z "$TAG_NAME" || -z "$ASSET_URL" ]]; then
-    err "Could not find a release tarball. Is there a release published?"
-fi
+TAG_NAME="$(jq -r '.tag_name // empty' <<<"$RELEASE_JSON")"
+[[ -n "$TAG_NAME" ]] || err "Could not parse the release tag."
 
 INSTALL_VERSION="${TAG_NAME#v}"
 ok "found $TAG_NAME"
@@ -134,24 +149,41 @@ if [[ -f "$DATA_DIR/version" ]]; then
     info "Upgrading from $CURRENT → $INSTALL_VERSION"
 fi
 
-# ── Download release ─────────────────────────────────────────────────────────
+# ── Download and verify release ──────────────────────────────────────────────
 
-TMPDIR="$(mktemp -d)"
-trap 'rm -rf "$TMPDIR"' EXIT
+TARBALL="transcriber-${INSTALL_VERSION}.tar.gz"
+
+# API URL of the asset with exactly this name (works for private repos).
+asset_url() {
+    jq -r --arg n "$1" '.assets[] | select(.name == $n) | .url' <<<"$RELEASE_JSON" | head -n1
+}
+
+TARBALL_URL="$(asset_url "$TARBALL")"
+SUMS_URL="$(asset_url "SHA256SUMS")"
+[[ -n "$TARBALL_URL" ]] || err "Release $TAG_NAME has no $TARBALL asset."
+[[ -n "$SUMS_URL" ]]    || err "Release $TAG_NAME has no SHA256SUMS asset — refusing to install unverified binaries."
+
+WORK_DIR="$(mktemp -d)"
+trap 'rm -rf -- "$WORK_DIR"' EXIT
 
 info "Downloading $TAG_NAME..."
-gh_api -H "Accept: application/octet-stream" \
-    "$(echo "$RELEASE_JSON" | grep -oP '"url"\s*:\s*"\K[^"]+assets/[0-9]+')" \
-    -o "$TMPDIR/release.tar.gz" || {
-    # Fallback: try browser_download_url directly
-    gh_api "$ASSET_URL" -o "$TMPDIR/release.tar.gz"
-}
+gh_api -H "Accept: application/octet-stream" "$TARBALL_URL" -o "$WORK_DIR/$TARBALL" \
+    || err "Failed to download $TARBALL"
+gh_api -H "Accept: application/octet-stream" "$SUMS_URL" -o "$WORK_DIR/SHA256SUMS" \
+    || err "Failed to download SHA256SUMS"
 ok "downloaded"
 
+info "Verifying checksum..."
+grep -E "^[0-9a-f]{64}  \*?${TARBALL//./\\.}\$" "$WORK_DIR/SHA256SUMS" > "$WORK_DIR/expected" \
+    || err "SHA256SUMS has no entry for $TARBALL"
+(cd "$WORK_DIR" && sha256sum --check --status expected) \
+    || err "Checksum mismatch for $TARBALL — refusing to install."
+ok "sha256 verified"
+
 info "Extracting..."
-tar xzf "$TMPDIR/release.tar.gz" -C "$TMPDIR"
-RELEASE_DIR="$(find "$TMPDIR" -maxdepth 1 -type d -name 'transcriber-*' | head -1)"
-[[ -d "$RELEASE_DIR" ]] || err "Unexpected tarball structure"
+tar xzf "$WORK_DIR/$TARBALL" -C "$WORK_DIR" --no-same-owner
+RELEASE_DIR="$WORK_DIR/transcriber-${INSTALL_VERSION}"
+[[ -d "$RELEASE_DIR/bin" ]] || err "Unexpected tarball structure"
 ok "extracted"
 
 # ── Stop daemon if upgrading ─────────────────────────────────────────────────
@@ -166,9 +198,14 @@ fi
 
 info "Installing binaries to $BIN_DIR..."
 mkdir -p "$BIN_DIR"
-install -m755 "$RELEASE_DIR/bin/transcriber-daemon"   "$BIN_DIR/"
-install -m755 "$RELEASE_DIR/bin/transcriber-settings"  "$BIN_DIR/"
-install -m755 "$RELEASE_DIR/bin/transcriber-overlay"   "$BIN_DIR/"
+# Temp file + rename, so a running binary is replaced instead of "Text file busy".
+install_bin() {
+    install -m755 "$1" "$BIN_DIR/.$(basename "$1").new"
+    mv -f "$BIN_DIR/.$(basename "$1").new" "$BIN_DIR/$(basename "$1")"
+}
+install_bin "$RELEASE_DIR/bin/transcriber-daemon"
+install_bin "$RELEASE_DIR/bin/transcriber-settings"
+install_bin "$RELEASE_DIR/bin/transcriber-overlay"
 ok ""
 
 info "Installing systemd services..."
@@ -176,6 +213,8 @@ mkdir -p "$SYSTEMD_DIR"
 install -m644 "$RELEASE_DIR/deploy/transcriber-daemon.service" "$SYSTEMD_DIR/"
 install -m644 "$RELEASE_DIR/deploy/transcriber-update.service" "$SYSTEMD_DIR/"
 install -m644 "$RELEASE_DIR/deploy/transcriber-update.timer"   "$SYSTEMD_DIR/"
+# Overlay unit is installed but not enabled — it's only for wlroots/KDE.
+install -m644 "$RELEASE_DIR/deploy/transcriber-overlay.service" "$SYSTEMD_DIR/"
 ok ""
 
 info "Installing DBus activation file..."
@@ -191,7 +230,7 @@ ok ""
 
 info "Installing GNOME extension..."
 mkdir -p "$EXT_DIR/schemas"
-cp -r "$RELEASE_DIR/extension/"* "$EXT_DIR/"
+cp -r "$RELEASE_DIR/extension/." "$EXT_DIR/"
 ok ""
 
 info "Compiling GSettings schema..."
@@ -212,6 +251,7 @@ info "Enabling services..."
 systemctl --user daemon-reload
 systemctl --user enable --now transcriber-daemon.service
 systemctl --user enable --now transcriber-update.timer
+systemctl --user try-restart transcriber-overlay.service 2>/dev/null || true
 ok ""
 
 # ── Done ─────────────────────────────────────────────────────────────────────
@@ -221,7 +261,10 @@ echo -e "${green}${bold}Transcriber $TAG_NAME installed successfully!${reset}"
 echo ""
 echo "Next steps:"
 echo "  1. Open 'Transcriber Settings' from the app launcher, or run: transcriber-settings"
-if [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
+if [[ "${XDG_CURRENT_DESKTOP:-}" != *GNOME* ]]; then
+    echo "  2. Not a GNOME session: enable the on-screen overlay + hotkey instead of the extension:"
+    echo "       systemctl --user enable --now transcriber-overlay.service"
+elif [ "${XDG_SESSION_TYPE:-}" = "wayland" ]; then
     echo "  2. Log out and back in so GNOME Shell picks up the extension."
     echo "     Then enable it:  gnome-extensions enable transcriber@local"
     echo "     (Wayland can't reload the shell in place — logout is required.)"

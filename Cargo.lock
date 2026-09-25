@@ -2902,16 +2902,11 @@ dependencies = [
 name = "transcriber-settings"
 version = "0.1.0"
 dependencies = [
- "anyhow",
  "dirs",
  "gtk4",
  "libadwaita",
  "rusqlite",
- "serde",
- "serde_json",
- "tokio",
  "transcriber-common",
- "zbus",
 ]
 
 [[package]]

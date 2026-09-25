@@ -126,6 +126,17 @@ pub struct AppConfig {
     /// System prompt sent to the LLM along with the raw transcript.
     #[serde(default = "default_postprocess_prompt")]
     pub postprocess_prompt: String,
+
+    // ── Limits & retention ────────────────────────────────────────────────────
+    /// Recording auto-stops after this many seconds; 0 disables the cap.
+    /// Batch providers reject large uploads outright (Groq: 25 MB, about 13
+    /// minutes of 16 kHz WAV), so an uncapped forgotten recording would fail
+    /// only after the whole wait.
+    #[serde(default = "default_max_recording_secs")]
+    pub max_recording_secs: u32,
+    /// Keep at most this many history entries (and their WAVs); 0 = unlimited.
+    #[serde(default = "default_history_max_entries")]
+    pub history_max_entries: u32,
 }
 
 fn default_provider()           -> String { "groq".into() }
@@ -187,6 +198,8 @@ pub const DEFAULT_POSTPROCESS_PROMPT: &str = "\
 * No unusual punctuation (e.g., do not use em dashes).";
 
 fn default_postprocess_prompt() -> String { DEFAULT_POSTPROCESS_PROMPT.into() }
+fn default_max_recording_secs() -> u32 { 600 }
+fn default_history_max_entries() -> u32 { 500 }
 
 impl Default for AppConfig {
     fn default() -> Self {
@@ -225,6 +238,8 @@ impl Default for AppConfig {
             postprocess_custom_api_key: String::new(),
             postprocess_custom_model:   String::new(),
             postprocess_prompt:         default_postprocess_prompt(),
+            max_recording_secs:         default_max_recording_secs(),
+            history_max_entries:        default_history_max_entries(),
         }
     }
 }
@@ -451,9 +466,11 @@ pub fn load() -> Result<AppConfig> {
         let old_url   = json["api_url"].as_str().unwrap_or("").to_string();
         let old_model = json["model"].as_str().unwrap_or("").to_string();
 
-        let mut cfg = AppConfig::default();
-        cfg.language    = json["language"].as_str().map(|s| s.to_string());
-        cfg.sample_rate = json["sample_rate"].as_u64().unwrap_or(16000) as u32;
+        let mut cfg = AppConfig {
+            language:    json["language"].as_str().map(|s| s.to_string()),
+            sample_rate: json["sample_rate"].as_u64().unwrap_or(16000) as u32,
+            ..AppConfig::default()
+        };
 
         if old_url.contains("groq.com") || old_url.is_empty() {
             cfg.provider     = "groq".into();
@@ -477,11 +494,57 @@ pub fn load() -> Result<AppConfig> {
     Ok(serde_json::from_str(&text)?)
 }
 
+/// Write `cfg` to `config.json` atomically, readable only by the owner.
+///
+/// The file holds every provider's API key, so it is created 0600 rather than
+/// inheriting the umask's usual 0644. The write goes to a sibling temp file
+/// that is fsynced and then renamed over the target, so a crash or a reader
+/// racing the write (the daemon on `ReloadConfig`, the NixOS activation hook)
+/// sees either the old file or the new one — never a truncated one that fails
+/// to parse. Renaming also replaces a symlink rather than writing through it,
+/// so a config that was once linked into the read-only Nix store becomes a
+/// plain, writable file on the first save.
 pub fn save(cfg: &AppConfig) -> Result<()> {
-    let path = config_path();
-    std::fs::create_dir_all(path.parent().unwrap())?;
-    std::fs::write(&path, serde_json::to_string_pretty(cfg)?)?;
-    Ok(())
+    save_to(&config_path(), cfg)
+}
+
+fn save_to(path: &std::path::Path, cfg: &AppConfig) -> Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+
+    let dir = path.parent().expect("config path has a parent");
+    std::fs::create_dir_all(dir)?;
+
+    let tmp = dir.join(format!(".config.json.{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut f = std::fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(&tmp)?;
+        f.write_all(serde_json::to_string_pretty(cfg)?.as_bytes())?;
+        f.sync_all()?;
+        std::fs::rename(&tmp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    result
+}
+
+/// Read the current file, apply `f`, and write it back.
+///
+/// For callers that hold a long-lived copy of the config (the settings GUI):
+/// applying just their edit to a fresh read means fields changed elsewhere in
+/// the meantime — by the NixOS activation hook, or a second window — are kept
+/// instead of being reverted by a whole-struct write of a stale copy.
+pub fn update(f: impl FnOnce(&mut AppConfig)) -> Result<AppConfig> {
+    let mut cfg = load()?;
+    f(&mut cfg);
+    save(&cfg)?;
+    Ok(cfg)
 }
 
 #[cfg(test)]
@@ -503,15 +566,13 @@ mod tests {
 
     #[test]
     fn disabled_switch_withholds_the_prompt() {
-        let mut cfg = AppConfig::default();
-        cfg.vocabulary_enabled = false;
+        let cfg = AppConfig { vocabulary_enabled: false, ..AppConfig::default() };
         assert_eq!(cfg.active_prompt(), None);
     }
 
     #[test]
     fn cohere_never_receives_a_prompt() {
-        let mut cfg = AppConfig::default();
-        cfg.provider = "cohere".into();
+        let cfg = AppConfig { provider: "cohere".into(), ..AppConfig::default() };
         assert_eq!(cfg.active_prompt(), None);
     }
 
@@ -535,6 +596,28 @@ mod tests {
     }
 
     #[test]
+    fn save_is_owner_only_and_replaces_symlinks() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("transcriber-save-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let target = dir.join("elsewhere.json");
+        std::fs::write(&target, "{}").unwrap();
+        let path = dir.join("config.json");
+        let _ = std::fs::remove_file(&path);
+        std::os::unix::fs::symlink(&target, &path).unwrap();
+
+        save_to(&path, &AppConfig::default()).unwrap();
+
+        let meta = std::fs::symlink_metadata(&path).unwrap();
+        assert!(meta.file_type().is_file(), "symlink should be replaced by a file");
+        assert_eq!(meta.permissions().mode() & 0o777, 0o600);
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "{}", "link target untouched");
+        let back: AppConfig = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        assert_eq!(back.max_recording_secs, 600);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn postprocess_prompt_lists_the_vocabulary() {
         let cfg = cfg_with(&["  AccuDose ", "", "Safehous"]);
         let prompt = cfg.active_postprocess_system_prompt();
@@ -544,8 +627,7 @@ mod tests {
 
     #[test]
     fn postprocess_prompt_is_untouched_without_vocabulary() {
-        let mut cfg = AppConfig::default();
-        cfg.vocabulary_enabled = false;
+        let cfg = AppConfig { vocabulary_enabled: false, ..AppConfig::default() };
         assert_eq!(cfg.active_postprocess_system_prompt(), cfg.postprocess_prompt);
         assert_eq!(cfg_with(&["", " "]).active_postprocess_system_prompt(), DEFAULT_POSTPROCESS_PROMPT);
     }

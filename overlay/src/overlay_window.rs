@@ -73,7 +73,7 @@ impl OverlayWindow {
 
         // ── Configure layer-shell ─────────────────────────────────────────────
         // This panics if the compositor does not support wlr-layer-shell.
-        // main.rs checks gtk4_layer_shell::is_layer_shell_supported() first.
+        // main.rs checks gtk4_layer_shell::is_supported() first and exits.
         window.init_layer_shell();
         window.set_layer(Layer::Overlay);
         window.set_anchor(Edge::Bottom, true);
@@ -117,6 +117,9 @@ impl OverlayWindow {
         let label = gtk4::Label::builder()
             .label("● Recording...")
             .visible(false)
+            // Error messages can be long; wrap instead of growing off-screen.
+            .wrap(true)
+            .max_width_chars(48)
             .build();
         label.add_css_class("overlay-label");
 
@@ -150,7 +153,9 @@ impl OverlayWindow {
         }
     }
 
-    /// Handle a daemon state transition.
+    /// Handle a transient daemon state. Terminal states (Done / Error /
+    /// cancel) carry context only `main.rs` knows, so it renders those
+    /// through `show_message`.
     pub fn handle_state(&self, state: &str) {
         match state {
             "Recording" => self.show_recording(),
@@ -166,17 +171,21 @@ impl OverlayWindow {
                 self.set_level(0.0);
                 self.update("Polishing...");
             }
-            "Done" => {
-                self.update("✓ Copied!");
-                self.schedule_fade(800);
-            }
-            "Error" => {
-                self.update("✗ Error — check logs");
-                self.schedule_fade(2500);
-            }
             "Idle" => self.schedule_fade(0),
             _ => {}
         }
+    }
+
+    /// Show `msg` in the label, then fade out after `hold_ms`.
+    pub fn show_message(&self, msg: &str, hold_ms: u32) {
+        // A new message owns the fade timing: bump the generation so a fade
+        // scheduled for an earlier message can't cut this one short.
+        let inner = &self.0;
+        inner.generation.set(inner.generation.get().wrapping_add(1));
+        inner.window.set_opacity(1.0);
+        self.set_level(0.0);
+        self.update(msg);
+        self.schedule_fade(hold_ms);
     }
 
     // ── Private helpers ───────────────────────────────────────────────────────
