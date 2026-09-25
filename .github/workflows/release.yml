@@ -22,7 +22,7 @@ jobs:
           dnf install -y \
             gcc git \
             alsa-lib-devel gtk4-devel libadwaita-devel \
-            glib2-devel gtk4-layer-shell-devel
+            glib2-devel gtk4-layer-shell-devel libxkbcommon-devel
 
       - uses: actions/checkout@v4
 

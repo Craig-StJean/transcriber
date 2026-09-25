@@ -67,7 +67,7 @@ bash update.sh
 
 ```
 alsa-lib-devel gtk4-devel libadwaita-devel
-gtk4-layer-shell-devel   # only for overlay crate
+gtk4-layer-shell-devel libxkbcommon-devel   # only for overlay crate
 ```
 
 Rust 1.92+ (pinned in `rust-toolchain.toml`), GNOME Shell 47–50, libadwaita 1.9+, PipeWire or ALSA.
